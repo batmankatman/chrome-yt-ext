@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 320px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      padding: 20px;
+      background: #1a1a2a;
+      color: #e2e2ee;
+    }
+    h2 {
+      font-size: 18px;
+      margin-bottom: 6px;
+      text-align: center;
+    }
+    .subtitle {
+      font-size: 12px;
+      color: #8080a0;
+      text-align: center;
+      margin-bottom: 16px;
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #2e2e42;
+      font-size: 13px;
+    }
+    .stat-label { color: #9090a8; }
+    .stat-value { font-weight: 600; }
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 10px;
+      margin-top: 12px;
+      border: none;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #4d66d9, #5c3582);
+      color: white;
+    }
+    .btn-primary:hover { opacity: 0.9; }
+    .btn-secondary {
+      background: #252535;
+      color: #c0c0d8;
+    }
+    .btn-secondary:hover { background: #2e2e42; }
+    #status {
+      font-size: 11px;
+      color: #4caf50;
+      text-align: center;
+      margin-top: 8px;
+      min-height: 16px;
+    }
+    </style>
+</head>
+<body>
+  <h2>🙏 Prayer Blocker</h2>
+  <p class="subtitle">YouTube Prayer Accountability</p>
+
+  <div class="stat-row">
+    <span class="stat-label">Total prayers</span>
+    <span class="stat-value" id="total-count">—</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Essays written</span>
+    <span class="stat-value" id="essay-count">—</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Auto-export</span>
+    <span class="stat-value">Every entry</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Timer remaining</span>
+    <span class="stat-value" id="timer-remaining">—</span>
+  </div>
+
+  <button class="btn btn-secondary" id="settings-btn">⚙️ Settings</button>
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

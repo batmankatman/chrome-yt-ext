@@ -1,0 +1,638 @@
+// YouTube Prayer Blocker Content Script (Chrome Extension)
+
+(function () {
+  'use strict';
+
+  // Default values
+  let PRAYER_TIMEOUT_MS = 5 * 60 * 1000;   // 5 minutes for regular prayer
+  let ESSAY_TIMEOUT_MS = 20 * 60 * 1000;    // 20 minutes for essay
+  let ESSAY_MIN_WORDS = 50;
+  let ALLOWED_PLAYLISTS = new Set([
+    'PLHcBUkwitvcO52am3hK9AQPr1CKk9adSP',
+    'PLHcBUkwitvcMxESxOvZSQY_OZ1qWw9X1U',
+    'PLHcBUkwitvcNfuhdyZIO8uldRlQYOndTS',
+  ]);
+  let EXPORT_SUBFOLDER = 'Prayers';  // Changed default to 'Prayers'
+
+  // Load settings from storage
+  function loadSettings() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get({
+        defaultPrayerTime: 5,
+        extendedPrayerTime: 20,
+        whitelistedSites: [
+          'PLHcBUkwitvcO52am3hK9AQPr1CKk9adSP',
+          'PLHcBUkwitvcMxESxOvZSQY_OZ1qWw9X1U',
+          'PLHcBUkwitvcNfuhdyZIO8uldRlQYOndTS'
+        ],
+        exportSubfolder: 'Prayers'  // Changed default to 'Prayers'
+      }, (settings) => {
+        PRAYER_TIMEOUT_MS = settings.defaultPrayerTime * 60 * 1000;
+        ESSAY_TIMEOUT_MS = settings.extendedPrayerTime * 60 * 1000;
+        ALLOWED_PLAYLISTS = new Set(settings.whitelistedSites);
+        EXPORT_SUBFOLDER = settings.exportSubfolder;
+        resolve();
+      });
+    });
+  }
+
+  // ── Helpers ──────────────────────────────────────────────
+
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  function wordCount(text) {
+    return text.trim().split(/\s+/).filter(Boolean).length;
+  }
+
+  function currentVideoId() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('v') || '';
+    } catch { return ''; }
+  }
+
+  // Only block watch pages that are NOT music
+  function isBlockablePage() {
+    const path = window.location.pathname;
+    const params = new URLSearchParams(window.location.search);
+    // Must be a /watch page with a video ID
+    if (path !== '/watch' || !params.get('v')) return false;
+    // Skip allowed playlists
+    if (ALLOWED_PLAYLISTS.has(params.get('list'))) return false;
+    // Skip music videos (category set by detector.js running in MAIN world)
+    if (isMusicVideo()) return false;
+    return true;
+  }
+
+  function isMusicVideo() {
+    const cat = document.documentElement.getAttribute('data-yt-category');
+    if (cat === 'music') return true;
+    // Fallback: check meta tag
+    const genre = document.querySelector('meta[itemprop="genre"]');
+    if (genre && genre.content.toLowerCase() === 'music') return true;
+    return false;
+  }
+
+  // Wait for detector.js to set the category attribute (up to 2.5s)
+  function waitForCategory() {
+    return new Promise((resolve) => {
+      if (document.documentElement.getAttribute('data-yt-category')) {
+        resolve();
+        return;
+      }
+      
+      const observer = new MutationObserver((mutations) => {
+        if (document.documentElement.getAttribute('data-yt-category')) {
+          observer.disconnect();
+          resolve();
+        }
+      });
+      
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-yt-category'] });
+      
+      // Timeout fallback
+      setTimeout(() => {
+        observer.disconnect();
+        resolve();
+      }, 2500);
+    });
+  }
+
+  // ── State helpers (chrome.storage.local with namespaced key) ────
+
+  const SESSION_KEY = '_prayerSession';
+
+  function getSessionState() {
+    return new Promise(resolve => {
+      chrome.storage.local.get({ [SESSION_KEY]: {} }, r => {
+        resolve(r[SESSION_KEY] || {});
+      });
+    });
+  }
+
+  function setSessionState(timeoutMs) {
+    // The "timer" here counts PLAYBACK minutes, not wall-clock minutes.
+    // prayer_played_ms accumulates time the video was actively playing.
+    // prayer_playing_since tracks the current play run (null when paused).
+    chrome.storage.local.set({
+      [SESSION_KEY]: {
+        prayer_completed: true,
+        prayer_timestamp: Date.now(),   // kept for legacy/debug
+        prayer_video_id: currentVideoId(),
+        prayer_timeout_ms: timeoutMs,
+        prayer_played_ms: 0,           // accumulated playback ms
+        prayer_playing_since: null,    // set when video plays, cleared on pause
+      }
+    });
+  }
+
+  // ── Playback tracking ────────────────────────────────
+  // We listen to the main video element's play/pause events and accumulate
+  // the elapsed playing time into session.prayer_played_ms. The countdown
+  // is therefore "minutes while a video is currently playing", not minutes
+  // since the prayer was submitted.
+
+  let lastSyncTimer = null;
+
+  function syncPlayedMs() {
+    getSessionState().then(state => {
+      if (!state.prayer_completed) return;
+      if (!state.prayer_playing_since) return;
+      const now = Date.now();
+      const delta = now - (state.prayer_playing_since || now);
+      if (delta <= 0) return;
+      // Cap delta defensively in case the tab was suspended for a long time
+      const capped = Math.min(delta, 5 * 60 * 1000);
+      const next = {
+        ...state,
+        prayer_played_ms: (state.prayer_played_ms || 0) + capped,
+        prayer_playing_since: now,
+      };
+      chrome.storage.local.set({ [SESSION_KEY]: next });
+      // If we just crossed the threshold, re-evaluate blocking
+      if (next.prayer_played_ms >= (next.prayer_timeout_ms || Infinity)) {
+        clearSessionState();
+        if (isBlockablePage() && !document.getElementById('prayer-overlay')) {
+          showBlockingOverlay();
+        }
+      }
+    });
+  }
+
+  function attachPlaybackListeners() {
+    // Find the main video (the one in #movie_player). YouTube re-creates
+    // the <video> on navigation, so we observe the DOM and rebind.
+    const bindTo = (video) => {
+      if (!video || video.__prayerBound) return;
+      video.__prayerBound = true;
+
+      const markPlaying = () => {
+        getSessionState().then(state => {
+          if (!state.prayer_completed) return;
+          if (state.prayer_playing_since) return; // already running
+          chrome.storage.local.set({
+            [SESSION_KEY]: { ...state, prayer_playing_since: Date.now() }
+          });
+          // Periodic flush so long plays don't lose precision on tab close
+          if (lastSyncTimer) clearInterval(lastSyncTimer);
+          lastSyncTimer = setInterval(syncPlayedMs, 5000);
+        });
+      };
+
+      const markPaused = () => {
+        if (lastSyncTimer) { clearInterval(lastSyncTimer); lastSyncTimer = null; }
+        syncPlayedMs();
+        getSessionState().then(state => {
+          if (!state.prayer_completed) return;
+          if (!state.prayer_playing_since) return;
+          const delta = Date.now() - state.prayer_playing_since;
+          const capped = Math.min(Math.max(delta, 0), 5 * 60 * 1000);
+          chrome.storage.local.set({
+            [SESSION_KEY]: {
+              ...state,
+              prayer_played_ms: (state.prayer_played_ms || 0) + capped,
+              prayer_playing_since: null,
+            }
+          });
+        });
+      };
+
+      video.addEventListener('play', markPlaying);
+      video.addEventListener('playing', markPlaying);
+      video.addEventListener('pause', markPaused);
+      video.addEventListener('ended', markPaused);
+      video.addEventListener('seeking', () => { /* ignore — still playing */ });
+      // Treat tab hidden as pause-equivalent so the clock stops when the
+      // user can't actually be watching.
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') markPaused();
+      });
+    };
+
+    const tryBind = () => {
+      const video = document.querySelector('#movie_player video');
+      if (video) bindTo(video);
+    };
+
+    tryBind();
+    // Watch for the video element being replaced on SPA navigation
+    const obs = new MutationObserver(tryBind);
+    if (document.body) obs.observe(document.body, { childList: true, subtree: true });
+  }
+
+  function detachPlaybackListeners() {
+    if (lastSyncTimer) { clearInterval(lastSyncTimer); lastSyncTimer = null; }
+  }
+
+  function clearSessionState() {
+    chrome.storage.local.remove(SESSION_KEY);
+  }
+
+  // ── Save prayer to persistent storage ──────────────────
+
+  function savePrayer(text, type) {
+    const now = new Date();
+    const prayer = {
+      text,
+      type, // 'prayer' or 'essay'
+      date: now.toLocaleDateString(),
+      time: now.toLocaleTimeString(),
+      timestamp: Date.now()
+    };
+
+    chrome.storage.local.get({ prayerJournal: [] }, result => {
+      const prayers = result.prayerJournal;
+      // Assign a monotonically increasing ID based on the max existing ID,
+      // so the background can track which entries have been exported
+      // (append-only) even if exports are delayed or fail.
+      const maxId = prayers.reduce((m, p) => Math.max(m, p.id || 0), 0);
+      prayer.id = maxId + 1;
+      prayers.unshift(prayer);
+      chrome.storage.local.set({ prayerJournal: prayers }, () => {
+        // Export to local file after every entry
+        chrome.runtime.sendMessage({ action: 'exportJournal' });
+      });
+    });
+  }
+
+  // ── Should we block? ──────────────────────────────────
+
+  async function shouldBlock() {
+    if (!isBlockablePage()) return false;
+
+    const state = await getSessionState();
+    if (!state.prayer_completed) return true;
+
+    // Compute current played ms (add the in-progress run if currently playing)
+    let playedMs = state.prayer_played_ms || 0;
+    if (state.prayer_playing_since) {
+      const delta = Date.now() - state.prayer_playing_since;
+      // Cap defensively against tab-suspend jumps
+      playedMs += Math.min(Math.max(delta, 0), 5 * 60 * 1000);
+    }
+    const timeout = state.prayer_timeout_ms || PRAYER_TIMEOUT_MS;
+
+    // Timed out (by playback minutes)
+    if (playedMs >= timeout) {
+      clearSessionState();
+      return true;
+    }
+
+    return false;
+  }
+
+  // ── Schedule next re-check ─────────────────────────────
+
+  let recheckTimer = null;
+
+  function scheduleRecheck() {
+    if (recheckTimer) clearTimeout(recheckTimer);
+    getSessionState().then(state => {
+      if (!state.prayer_completed) return;
+      const timeout = state.prayer_timeout_ms || PRAYER_TIMEOUT_MS;
+      let played = state.prayer_played_ms || 0;
+      if (state.prayer_playing_since) {
+        played += Math.min(Math.max(Date.now() - state.prayer_playing_since, 0), 5 * 60 * 1000);
+      }
+      const remaining = timeout - played;
+      if (remaining > 0) {
+        recheckTimer = setTimeout(async () => {
+          if (await shouldBlock()) showBlockingOverlay();
+        }, remaining + 200); // small buffer
+      }
+    });
+  }
+
+  // ── Blocking overlay ───────────────────────────────────
+
+  function showBlockingOverlay() {
+    if (document.getElementById('prayer-overlay')) return;
+
+    const overlay = document.createElement('div');
+    overlay.id = 'prayer-overlay';
+    overlay.innerHTML = `
+      <div class="prayer-container">
+        <div class="prayer-content">
+          <h2>Pause & Pray</h2>
+          <p>Before engaging with this content, please take a moment for reflection.</p>
+          <label for="prayer-input">Prayer before engaging:</label>
+          <textarea id="prayer-input" placeholder="Enter your prayer or reflection here..." rows="4"></textarea>
+          <div id="prayer-word-count" style="display:none; text-align:right; font-size:12px; color:#7070a0; margin-top:-16px; margin-bottom:12px;"></div>
+          <div class="prayer-btn-row">
+            <button id="continue-btn" class="prayer-primary-btn">Continue <span class="btn-subtitle">(${Math.round(PRAYER_TIMEOUT_MS / 60000)} min)</span><span class="btn-subtitle">(Cmd+Enter)</span></button>
+            <button id="essay-btn" class="prayer-essay-btn">Essay <span class="btn-subtitle">(${Math.round(ESSAY_TIMEOUT_MS / 60000)} min, ${ESSAY_MIN_WORDS}+ words)</span><span class="btn-subtitle">(Cmd+&#x21E7;+Enter)</span></button>
+          </div>
+          <button id="prayer-journal-btn">📖 Prayer Journal</button>
+        </div>
+      </div>
+    `;
+
+    document.documentElement.appendChild(overlay);
+    document.documentElement.style.overflow = 'hidden';
+
+    // Pause the main video player while overlay is up
+    const mainVideo = document.querySelector('#movie_player video');
+    if (mainVideo) mainVideo.pause();
+
+    // Start guard to prevent overlay removal
+    startOverlayGuard();
+
+    const input = document.getElementById('prayer-input');
+    const continueBtn = document.getElementById('continue-btn');
+    const essayBtn = document.getElementById('essay-btn');
+    const journalBtn = document.getElementById('prayer-journal-btn');
+    const wcDisplay = document.getElementById('prayer-word-count');
+
+    function updateWordCount() {
+      const wc = wordCount(input.value);
+      wcDisplay.style.display = wc > 0 ? 'block' : 'none';
+      wcDisplay.textContent = `${wc} / ${ESSAY_MIN_WORDS} words`;
+      wcDisplay.style.color = wc >= ESSAY_MIN_WORDS ? '#4caf50' : '#7070a0';
+    }
+
+    input.addEventListener('input', updateWordCount);
+
+    function submitPrayer() {
+      const text = input.value.trim();
+      if (!text) {
+        input.classList.add('shake');
+        setTimeout(() => input.classList.remove('shake'), 500);
+        input.focus();
+        return;
+      }
+      savePrayer(text, 'prayer');
+      setSessionState(PRAYER_TIMEOUT_MS);
+      document.documentElement.style.overflow = '';
+      overlay.remove();
+      stopOverlayGuard();
+      scheduleRecheck();
+      attachPlaybackListeners();
+    }
+
+    function submitEssay() {
+      const text = input.value.trim();
+      if (!text) {
+        input.classList.add('shake');
+        setTimeout(() => input.classList.remove('shake'), 500);
+        input.focus();
+        return;
+      }
+      if (wordCount(text) < ESSAY_MIN_WORDS) {
+        input.classList.add('shake');
+        setTimeout(() => input.classList.remove('shake'), 500);
+        wcDisplay.style.display = 'block';
+        wcDisplay.style.color = '#ff6b6b';
+        input.focus();
+        return;
+      }
+      savePrayer(text, 'essay');
+      setSessionState(ESSAY_TIMEOUT_MS);
+      document.documentElement.style.overflow = '';
+      overlay.remove();
+      stopOverlayGuard();
+      scheduleRecheck();
+      attachPlaybackListeners();
+    }
+
+    continueBtn.addEventListener('click', submitPrayer);
+    essayBtn.addEventListener('click', submitEssay);
+
+    journalBtn.addEventListener('click', () => showPrayerJournal());
+
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && e.metaKey && e.shiftKey) { submitEssay(); return; }
+      if (e.key === 'Enter' && e.metaKey) submitPrayer();
+    });
+
+    setTimeout(() => input.focus(), 100);
+  }
+
+  // ── Prayer journal modal ───────────────────────────────
+
+  function showPrayerJournal() {
+    const modal = document.createElement('div');
+    modal.className = 'prayer-journal-modal';
+
+    const content = document.createElement('div');
+    content.className = 'prayer-journal-content';
+    content.innerHTML = `
+      <button id="close-journal" class="journal-close-btn">✕</button>
+      <h3 class="journal-title">Prayer Journal</h3>
+      <button id="export-journal" class="journal-export-btn">📥 Export Journal</button>
+      <div id="journal-entries" class="journal-entries">Loading...</div>
+    `;
+    modal.appendChild(content);
+    document.body.appendChild(modal);
+
+    chrome.storage.local.get({ prayerJournal: [] }, result => {
+      const prayers = result.prayerJournal;
+      const div = document.getElementById('journal-entries');
+      if (!prayers.length) {
+        div.innerHTML = '<div class="journal-empty">No prayers yet. Start your journal today!</div>';
+      } else {
+        div.innerHTML = prayers.map(p => `
+          <div class="journal-entry">
+            <div class="journal-entry-meta">${escapeHtml(p.date)} at ${escapeHtml(p.time)}${p.type === 'essay' ? ' <span class="journal-badge">Essay</span>' : ''}</div>
+            <div class="journal-entry-text">${escapeHtml(p.text)}</div>
+          </div>
+        `).join('');
+      }
+    });
+
+    document.getElementById('close-journal').addEventListener('click', () => modal.remove());
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+
+    document.getElementById('export-journal').addEventListener('click', () => {
+      chrome.storage.local.get({ prayerJournal: [] }, result => {
+        const prayers = result.prayerJournal;
+        if (!prayers.length) { alert('No prayers to export yet!'); return; }
+
+        let txt = 'Prayer Journal Export\n' + '='.repeat(50) + '\n\n';
+        prayers.forEach(p => {
+          txt += `${p.date} at ${p.time}${p.type === 'essay' ? ' [Essay]' : ''}\n`;
+          txt += '-'.repeat(50) + '\n';
+          txt += p.text + '\n\n';
+        });
+
+        const blob = new Blob([txt], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'prayer-journal.txt';
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+    });
+  }
+
+  // ── URL change detection (YouTube is an SPA) ──────────
+
+  let lastUrl = location.href;
+
+  function onUrlChange() {
+    const newUrl = location.href;
+    if (newUrl === lastUrl) return;
+    lastUrl = newUrl;
+
+    const path = window.location.pathname;
+    const params = new URLSearchParams(window.location.search);
+
+    // Not a watch page — remove overlay if present, disable previews
+    if (path !== '/watch' || !params.get('v')) {
+      removeOverlay();
+      disableAutoplayPreviews();
+      detachPlaybackListeners();
+      return;
+    }
+
+    // Wait for detector.js to update category, then decide
+    setTimeout(async () => {
+      await waitForCategory();
+      if (await shouldBlock()) {
+        showBlockingOverlay();
+      } else {
+        removeOverlay();
+        attachPlaybackListeners();
+      }
+    }, 400); // small delay so detector.js can update
+  }
+
+  function removeOverlay() {
+    const existing = document.getElementById('prayer-overlay');
+    if (existing) { existing.remove(); document.documentElement.style.overflow = ''; }
+  }
+
+  new MutationObserver(onUrlChange).observe(document, { subtree: true, childList: true });
+
+  // ── Visibility / focus re-checks ──────────────────────
+
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible' && await shouldBlock()) {
+      showBlockingOverlay();
+    }
+  });
+
+  window.addEventListener('focus', async () => {
+    if (await shouldBlock() && !document.getElementById('prayer-overlay')) {
+      showBlockingOverlay();
+    }
+  });
+
+  // ── Initial load ──────────────────────────────────────
+
+  async function init() {
+    // Load settings first
+    await loadSettings();
+    
+    const path = window.location.pathname;
+    const params = new URLSearchParams(window.location.search);
+
+    // Quick exit for non-watch pages
+    if (path !== '/watch' || !params.get('v')) {
+      disableAutoplayPreviews();
+      return;
+    }
+
+    // Inject a <style> to hide the page immediately (survives DOM rebuilds)
+    const hideStyle = document.createElement('style');
+    hideStyle.id = 'prayer-hide-style';
+    hideStyle.textContent = 'html.prayer-pending { visibility: hidden !important; }';
+    document.documentElement.appendChild(hideStyle);
+    document.documentElement.classList.add('prayer-pending');
+
+    // Wait for detector.js to provide the category
+    await waitForCategory();
+
+    // If it's music, just show the page
+    if (isMusicVideo()) {
+      revealPage();
+      return;
+    }
+
+    if (await shouldBlock()) {
+      const show = () => {
+        showBlockingOverlay();
+        revealPage();
+      };
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', show);
+      } else {
+        show();
+      }
+    } else {
+      revealPage();
+      scheduleRecheck();
+      attachPlaybackListeners();
+    }
+  }
+
+  function revealPage() {
+    document.documentElement.classList.remove('prayer-pending');
+    const s = document.getElementById('prayer-hide-style');
+    if (s) s.remove();
+    document.documentElement.style.visibility = '';
+  }
+
+  // ── Persistent guard: re-show overlay if removed unexpectedly ──
+
+  let guardInterval = null;
+
+  function startOverlayGuard() {
+    if (guardInterval) return;
+    guardInterval = setInterval(async () => {
+      // Only guard on blockable pages
+      if (!isBlockablePage()) {
+        stopOverlayGuard();
+        return;
+      }
+      // If overlay is gone but we should still be blocking, re-show it
+      if (!document.getElementById('prayer-overlay') && await shouldBlock()) {
+        showBlockingOverlay();
+      }
+    }, 1000);
+  }
+
+  function stopOverlayGuard() {
+    if (guardInterval) { clearInterval(guardInterval); guardInterval = null; }
+  }
+
+  // ── Anti-cheat: disable autoplay video previews on non-watch pages ──
+
+  function disableAutoplayPreviews() {
+    // Continuously pause any preview/inline videos on search, home, feeds
+    const pauseAll = () => {
+      document.querySelectorAll('video').forEach(v => {
+        // Don't touch the main player on /watch pages
+        if (window.location.pathname === '/watch' && v.closest('#movie_player')) return;
+        if (!v.paused) {
+          v.pause();
+          v.removeAttribute('autoplay');
+        }
+      });
+    };
+
+    // Run immediately and observe for new video elements
+    pauseAll();
+    const obs = new MutationObserver(pauseAll);
+    if (document.body) {
+      obs.observe(document.body, { childList: true, subtree: true });
+    } else {
+      document.addEventListener('DOMContentLoaded', () => {
+        obs.observe(document.body, { childList: true, subtree: true });
+      });
+    }
+
+    // Also intercept play events
+    document.addEventListener('play', e => {
+      if (window.location.pathname !== '/watch' && e.target.tagName === 'VIDEO') {
+        e.target.pause();
+      }
+    }, true);
+  }
+
+  init();
+})();

@@ -1,0 +1,10 @@
+{
+  "extensionName": {
+    "message": "YouTube Prayer Blocker",
+    "description": "The display name for the extension."
+  },
+  "extensionDescription": {
+    "message": "Blocks YouTube until a prayer is entered. Includes prayer journal with weekly auto-export.",
+    "description": "The description for the extension."
+  }
+}
