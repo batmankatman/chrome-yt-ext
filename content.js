@@ -13,10 +13,14 @@
     'PLHcBUkwitvcNfuhdyZIO8uldRlQYOndTS',
   ]);
   let EXPORT_SUBFOLDER = 'Prayers';
-  // Prayer blocking for music videos. Default ON (existing behavior).
-  let BLOCK_MUSIC_VIDEOS = true;
-  // Hard-disable playback for music videos. Default OFF.
-  let DISABLE_MUSIC_PLAYBACK = false;
+  // Prayer blocking for music videos. When true, music videos are
+  // treated like any other blockable video (the prayer overlay applies).
+  // Default OFF — the toggle is named "Block Music Videos" but its
+  // semantic is now: ON = block, OFF = don't block.
+  let BLOCK_MUSIC_VIDEOS = false;
+  // Hide only the picture (audio keeps playing) for music videos.
+  // Default ON.
+  let DISABLE_MUSIC_PLAYBACK = true;
 
   // Load settings from storage
   function loadSettings() {
@@ -30,15 +34,15 @@
           'PLHcBUkwitvcNfuhdyZIO8uldRlQYOndTS'
         ],
         exportSubfolder: 'Prayers',
-        blockMusicVideos: true,
-        disableMusicPlayback: false,
+        blockMusicVideos: false,
+        disableMusicPlayback: true,
       }, (settings) => {
         PRAYER_TIMEOUT_MS = settings.defaultPrayerTime * 60 * 1000;
         ESSAY_TIMEOUT_MS = settings.extendedPrayerTime * 60 * 1000;
         ALLOWED_PLAYLISTS = new Set(settings.whitelistedSites);
         EXPORT_SUBFOLDER = settings.exportSubfolder;
-        BLOCK_MUSIC_VIDEOS = settings.blockMusicVideos !== false;
-        DISABLE_MUSIC_PLAYBACK = settings.disableMusicPlayback === true;
+        BLOCK_MUSIC_VIDEOS = settings.blockMusicVideos === true;
+        DISABLE_MUSIC_PLAYBACK = settings.disableMusicPlayback !== false;
         resolve();
       });
     });
@@ -63,7 +67,10 @@
     } catch { return ''; }
   }
 
-  // Only block watch pages that are NOT music (when BLOCK_MUSIC_VIDEOS is on)
+  // Only block watch pages that aren't already whitelisted.
+  // When BLOCK_MUSIC_VIDEOS is on, music videos are *also* blockable
+  // (the toggle's semantic is "should the prayer overlay apply to
+  // music videos?" — ON = yes, OFF = no).
   function isBlockablePage() {
     const path = window.location.pathname;
     const params = new URLSearchParams(window.location.search);
@@ -71,9 +78,6 @@
     if (path !== '/watch' || !params.get('v')) return false;
     // Skip allowed playlists
     if (ALLOWED_PLAYLISTS.has(params.get('list'))) return false;
-    // Skip music videos only if the user has the music-block switch ON.
-    // When the switch is OFF, music videos are blockable like any other.
-    if (BLOCK_MUSIC_VIDEOS && isMusicVideo()) return false;
     return true;
   }
 
@@ -221,11 +225,10 @@
       video.addEventListener('pause', markPaused);
       video.addEventListener('ended', markPaused);
       video.addEventListener('seeking', () => { /* ignore — still playing */ });
-      // Treat tab hidden as pause-equivalent so the clock stops when the
-      // user can't actually be watching.
-      document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'hidden') markPaused();
-      });
+      // Do NOT pause the timer on tab hide: when the user returns to a
+      // YouTube tab the timer should keep going. The 5-minute cap in
+      // syncPlayedMs already prevents runaway accumulation if the tab
+      // was suspended for hours.
     };
 
     const tryBind = () => {
@@ -582,26 +585,26 @@
 
   function applyDisableVisuals() {
     if (!musicDisablerActive) return;
-    // Inject the hide style if missing. This hides the main player and
-    // any inline player container visually only — audio is untouched.
+    // Inject the hide style if missing. We hide ONLY the picture — the
+    // <video> element is collapsed, but its audio track keeps decoding.
+    // The title, channel, description, and player controls remain
+    // visible (the .html5-video-player container holds the controls;
+    // we keep it rendered so playback controls stay accessible).
     let dim = document.getElementById('prayer-music-dim');
     if (!dim) {
       dim = document.createElement('style');
       dim.id = 'prayer-music-dim';
-      // Hide the video element itself, the main player, and the
-      // miniplayer / inline-playback containers. Audio is unaffected.
       dim.textContent = [
-        '#movie_player, ytd-watch-flexy #player-container-outer,',
-        'ytd-watch-flexy #player-container-inner,',
-        'ytd-watch-flexy #below, ytd-watch-flexy #player,',
-        'ytd-miniplayer-player, .html5-video-player {',
+        // Collapse the video frame so the picture is gone, but leave
+        // the controls/chrome (so the user can still pause etc.).
+        '#movie_player video,',
+        'ytd-watch-flexy #player-container-outer video,',
+        'ytd-watch-flexy #player-container-inner video,',
+        'ytd-miniplayer-player video {',
         '  visibility: hidden !important;',
-        '  height: 0 !important; min-height: 0 !important;',
-        '  overflow: hidden !important;',
-        '}',
-        // Keep the <video> element itself rendered (visibility:visible)
-        // so its audio track keeps decoding and reaching the speakers.
-        'video { visibility: visible !important; }'
+        '  width: 1px !important; height: 1px !important;',
+        '  position: absolute !important; left: -9999px !important;',
+        '}'
       ].join('\n');
       document.documentElement.appendChild(dim);
     }
@@ -612,13 +615,20 @@
     const el = document.createElement('div');
     el.id = 'prayer-music-notice';
     el.textContent = '🎵 Video hidden — audio playing';
+    // Centered on the page so it sits over where the video would be
     el.style.cssText = [
-      'position:fixed', 'top:16px', 'right:16px', 'z-index:999999998',
+      'position:fixed',
+      'top:50%', 'left:50%',
+      'transform:translate(-50%,-50%)',
+      'z-index:999999998',
       'background:linear-gradient(135deg,#4d66d9,#5c3582)',
-      'color:white', 'padding:10px 14px', 'border-radius:8px',
+      'color:white',
+      'padding:14px 20px',
+      'border-radius:12px',
       'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif',
-      'font-size:13px', 'font-weight:600',
-      'box-shadow:0 6px 20px rgba(0,0,0,0.4)'
+      'font-size:15px', 'font-weight:600',
+      'box-shadow:0 8px 24px rgba(0,0,0,0.5)',
+      'pointer-events:none'
     ].join(';');
     document.documentElement.appendChild(el);
   }
@@ -669,10 +679,10 @@
   chrome.storage.onChanged.addListener((changes, namespace) => {
     if (namespace !== 'local') return;
     if (changes.blockMusicVideos) {
-      BLOCK_MUSIC_VIDEOS = changes.blockMusicVideos.newValue !== false;
+      BLOCK_MUSIC_VIDEOS = changes.blockMusicVideos.newValue === true;
     }
     if (changes.disableMusicPlayback) {
-      DISABLE_MUSIC_PLAYBACK = changes.disableMusicPlayback.newValue === true;
+      DISABLE_MUSIC_PLAYBACK = changes.disableMusicPlayback.newValue !== false;
       if (DISABLE_MUSIC_PLAYBACK) ensureMusicDisabler();
       else stopMusicDisabler();
     }

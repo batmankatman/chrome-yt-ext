@@ -9,8 +9,8 @@ const DEFAULTS = {
     'PLHcBUkwitvcNfuhdyZIO8uldRlQYOndTS',
   ],
   exportSubfolder: 'Prayers',
-  blockMusicVideos: true,
-  disableMusicPlayback: false,
+  blockMusicVideos: false,
+  disableMusicPlayback: true,
 };
 
 const inputs = {
@@ -414,8 +414,8 @@ function loadSettings() {
     inputs.defaultPrayerTime.value = settings.defaultPrayerTime;
     inputs.extendedPrayerTime.value = settings.extendedPrayerTime;
     inputs.exportSubfolder.value = settings.exportSubfolder;
-    inputs.blockMusicVideos.checked = settings.blockMusicVideos !== false;
-    inputs.disableMusicPlayback.checked = settings.disableMusicPlayback === true;
+    inputs.blockMusicVideos.checked = settings.blockMusicVideos === true;
+    inputs.disableMusicPlayback.checked = settings.disableMusicPlayback !== false;
     const sites = Array.isArray(settings.whitelistedSites)
       ? settings.whitelistedSites.filter(s => typeof s === 'string')
       : DEFAULTS.whitelistedSites;

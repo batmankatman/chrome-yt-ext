@@ -36,8 +36,8 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
 // ── Export journal as a download ─────────────────────────
 // Append-only: only entries not yet exported are written.
 // Saves to {exportSubfolder}/Prayers.txt (FS API path appends to the
-// existing file; the Downloads fallback writes new entries to a new
-// timestamped file so Prayers.txt is never overwritten).
+// existing file; the Downloads fallback reads any existing Prayers.txt
+// and rewrites it with merged content so the file name stays stable).
 
 async function exportJournal() {
   const result = await chrome.storage.local.get({
@@ -61,7 +61,6 @@ async function exportJournal() {
     txt += p.text + '\n\n';
   });
 
-  const blob = new Blob([txt], { type: 'text/plain' });
   const maxId = newEntries.reduce((m, p) => Math.max(m, p.id || 0), lastId);
 
   // If custom export folder is set, use File System Access API (append)
@@ -72,7 +71,7 @@ async function exportJournal() {
         const granted = await customExportDirectoryHandle.requestPermission({ mode: 'readwrite' });
         if (granted !== 'granted') {
           console.log('Permission denied for custom export folder, falling back to Downloads');
-          return downloadNewEntries(blob, maxId);
+          return downloadMergedToDownloads(txt, maxId);
         }
       }
 
@@ -97,31 +96,86 @@ async function exportJournal() {
       return;
     } catch (err) {
       console.error('Failed to write to custom folder, falling back to Downloads:', err);
-      return downloadNewEntries(blob, maxId);
+      return downloadMergedToDownloads(txt, maxId);
     }
   }
 
-  // Fallback to Downloads folder (can't append, so write a new file)
-  return downloadNewEntries(blob, maxId);
+  // Fallback to Downloads folder — append to existing Prayers.txt
+  return downloadMergedToDownloads(txt, maxId);
 }
 
-function downloadNewEntries(blob, maxId) {
-  const reader = new FileReader();
-  reader.onloadend = () => {
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+// Try to find an existing Prayers.txt in Downloads, merge the new
+// entries with its existing content, and write the merged result back
+// to the same filename with conflictAction: 'overwrite'. This keeps
+// the filename stable (no Prayers-{timestamp}.txt) and avoids losing
+// previously exported entries.
+async function downloadMergedToDownloads(txt, maxId) {
+  try {
     const base = EXPORT_SUBFOLDER ? `${EXPORT_SUBFOLDER}/` : '';
-    const fullPath = `${base}Prayers-${stamp}.txt`;
+    const filename = `${base}${EXPORT_FILENAME}`;
+    const existing = await readExistingDownload(filename);
+    const merged = existing ? existing + '\n' + txt : txt;
+    const blob = new Blob([merged], { type: 'text/plain' });
+    await downloadBlob(blob, filename, 'overwrite');
+    await chrome.storage.local.set({ lastExportedId: maxId });
+  } catch (err) {
+    console.error('Failed to merge with existing Prayers.txt, writing new entries only:', err);
+    // Last-resort: write a fresh file with just the new entries so
+    // nothing is lost (the user can manually merge).
+    const base = EXPORT_SUBFOLDER ? `${EXPORT_SUBFOLDER}/` : '';
+    const filename = `${base}${EXPORT_FILENAME}`;
+    const blob = new Blob([txt], { type: 'text/plain' });
+    await downloadBlob(blob, filename, 'overwrite');
+    await chrome.storage.local.set({ lastExportedId: maxId });
+  }
+}
 
-    chrome.downloads.download({
-      url: reader.result,
-      filename: fullPath,
-      conflictAction: 'uniquify',
-      saveAs: false
-    }, () => {
-      chrome.storage.local.set({ lastExportedId: maxId });
-    });
-  };
-  reader.readAsDataURL(blob);
+// Search Chrome's download history for an existing file matching the
+// given filename and read its contents (if the OS exposes them).
+async function readExistingDownload(filename) {
+  // The Downloads API's `filename` field is the full disk path on
+  // Chrome OS / macOS / Linux / Windows, so we filter by endsWith to
+  // match Prayers.txt inside the configured subfolder.
+  const items = await new Promise((resolve) => {
+    chrome.downloads.search({ filenameRegex: `/${escapeRegex(filename)}$` }, resolve);
+  });
+  if (!items || !items.length) return '';
+  // Prefer the most recent successful download
+  items.sort((a, b) => (b.startTime || 0) - (a.startTime || 0));
+  for (const item of items) {
+    if (item.state !== 'complete') continue;
+    if (!item.url) continue;
+    try {
+      // The download item exposes a `file` URL we can fetch
+      // (chrome:// downloads expose file:// URLs to MV3 service workers).
+      const r = await fetch(item.url);
+        if (r.ok) return await r.text();
+    } catch { /* try next */ }
+  }
+  return '';
+}
+
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function downloadBlob(blob, filename, conflictAction) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      chrome.downloads.download({
+        url: reader.result,
+        filename,
+        conflictAction,
+        saveAs: false
+      }, (downloadId) => {
+        const err = chrome.runtime.lastError;
+        if (err) reject(err); else resolve(downloadId);
+      });
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
 }
 
 // ── Listen for export requests (from content script or popup) ────

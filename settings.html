@@ -370,22 +370,22 @@
       <label class="switch-row" for="block-music-videos">
         <span class="switch-label">Block Music Videos</span>
         <span class="switch">
-          <input type="checkbox" id="block-music-videos" checked>
+          <input type="checkbox" id="block-music-videos">
           <span class="switch-slider"></span>
         </span>
       </label>
-      <small>When ON (default), music videos are treated as exempt from the prayer overlay. When OFF, music videos behave like any other video.</small>
+      <small>When ON, the prayer overlay applies to music videos (they're treated like any other video). When OFF (default), music videos are exempt from the prayer overlay.</small>
     </div>
 
     <div class="setting-item switch-item">
       <label class="switch-row" for="disable-music-playback">
         <span class="switch-label">Video Disabler (for Music)</span>
         <span class="switch">
-          <input type="checkbox" id="disable-music-playback">
+          <input type="checkbox" id="disable-music-playback" checked>
           <span class="switch-slider"></span>
         </span>
       </label>
-      <small>When ON, music videos are detected and only the <strong>video</strong> (picture) is hidden while the <strong>audio keeps playing</strong>. Detection uses the video category, the &lt;meta&gt; genre, the title, whether the video is auto-generated, and whether the artist has a verified-music badge. When OFF, no video is disabled.</small>
+      <small>When ON (default), music videos are detected and only the <strong>video</strong> (picture) is hidden while the <strong>audio keeps playing</strong>. Detection uses the video category, the &lt;meta&gt; genre, the title (including "official video"), whether the video is auto-generated, and whether the artist has a verified-music badge. <em>Comments are hidden along with the video.</em> When OFF, no video is disabled.</small>
     </div>
   </div>
 
