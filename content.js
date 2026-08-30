@@ -496,6 +496,10 @@
     if (newUrl === lastUrl) return;
     lastUrl = newUrl;
 
+    // Always tear down the previous page's state immediately so a music
+    // video's hidden picture never leaks into a non-music video.
+    stopMusicDisabler();
+
     const path = window.location.pathname;
     const params = new URLSearchParams(window.location.search);
 
@@ -504,7 +508,6 @@
       removeOverlay();
       disableAutoplayPreviews();
       detachPlaybackListeners();
-      stopMusicDisabler();
       return;
     }
 
@@ -515,7 +518,8 @@
       // Music disabler runs IN PARALLEL with the prayer overlay: if the
       // user is on a music video and has the disabler ON, the picture
       // is hidden (audio keeps playing) whether or not the prayer
-      // overlay is also being shown.
+      // overlay is also being shown. Otherwise it is explicitly stopped
+      // so the next video's picture is fully visible.
       if (DISABLE_MUSIC_PLAYBACK && isMusicVideo()) {
         ensureMusicDisabler();
       } else {
@@ -614,13 +618,16 @@
     if (document.getElementById('prayer-music-notice')) return;
     const el = document.createElement('div');
     el.id = 'prayer-music-notice';
-    el.textContent = '🎵 Video hidden — audio playing';
-    // Centered on the page so it sits over where the video would be
+    el.textContent = '🎵 Video Hidden (Audio Only)';
+    // Anchor inside the movie_player so it stays locked to the player
+    // box even when the page scrolls. The element is absolutely
+    // positioned within the player; it ignores pointer events so it
+    // never blocks interaction with the controls underneath.
     el.style.cssText = [
-      'position:fixed',
+      'position:absolute',
       'top:50%', 'left:50%',
       'transform:translate(-50%,-50%)',
-      'z-index:999999998',
+      'z-index:50',
       'background:linear-gradient(135deg,#4d66d9,#5c3582)',
       'color:white',
       'padding:14px 20px',
@@ -628,9 +635,21 @@
       'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif',
       'font-size:15px', 'font-weight:600',
       'box-shadow:0 8px 24px rgba(0,0,0,0.5)',
-      'pointer-events:none'
+      'pointer-events:none',
+      'white-space:nowrap'
     ].join(';');
-    document.documentElement.appendChild(el);
+
+    // Inject into the player so it scrolls WITH the video frame.
+    // If the player isn't in the DOM yet, fall back to documentElement.
+    const host = document.querySelector('#movie_player')
+              || document.getElementById('player')
+              || document.documentElement;
+    // Make sure the host can host an absolutely-positioned child
+    const cs = window.getComputedStyle(host);
+    if (cs.position === 'static') {
+      host.style.position = 'relative';
+    }
+    host.appendChild(el);
   }
 
   function stopMusicDisabler() {
