@@ -99,14 +99,21 @@ async function exportJournal() {
   return overwriteDownloads(txt, newestId);
 }
 
-// Always write to {EXPORT_SUBFOLDER}/Prayers.txt with overwrite so the
-// filename is stable. This avoids the timestamped Prayers-{stamp}.txt
-// filenames Chrome was producing under the old per-entry append path.
+// Fallback used when the File System Access API folder is NOT chosen.
+// We CANNOT safely append to an existing file in the user's Downloads
+// folder from a Chrome MV3 service worker — `fetch(file://…)` is blocked
+// and `chrome.fileSystem` doesn't exist in MV3. To avoid destroying
+// content written by other browsers (e.g. Vivaldi) or by previous
+// versions of this extension, we write to a UNIQUE timestamped file
+// each time. The filename stays stable (Prayers.txt) ONLY when the
+// user has granted access to a folder via "Choose Folder".
 async function overwriteDownloads(txt, newestId) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const base = EXPORT_SUBFOLDER ? `${EXPORT_SUBFOLDER}/` : '';
-  const filename = `${base}${EXPORT_FILENAME}`;
+  // Use uniquify so we never overwrite an existing file.
+  const filename = `${base}Prayers-${stamp}.txt`;
   const blob = new Blob([txt], { type: 'text/plain' });
-  await downloadBlob(blob, filename, 'overwrite');
+  await downloadBlob(blob, filename, 'uniquify');
   await chrome.storage.local.set({ lastExportedId: newestId });
 }
 
