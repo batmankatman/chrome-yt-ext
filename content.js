@@ -12,7 +12,15 @@
     'PLHcBUkwitvcMxESxOvZSQY_OZ1qWw9X1U',
     'PLHcBUkwitvcNfuhdyZIO8uldRlQYOndTS',
   ]);
-  let EXPORT_SUBFOLDER = 'Prayers';  // Changed default to 'Prayers'
+  let EXPORT_SUBFOLDER = 'Prayers';
+  // Prayer blocking for music videos. When true, music videos are
+  // treated like any other blockable video (the prayer overlay applies).
+  // Default OFF — the toggle is named "Block Music Videos" but its
+  // semantic is now: ON = block, OFF = don't block.
+  let BLOCK_MUSIC_VIDEOS = false;
+  // Hide only the picture (audio keeps playing) for music videos.
+  // Default ON.
+  let DISABLE_MUSIC_PLAYBACK = true;
 
   // Load settings from storage
   function loadSettings() {
@@ -25,12 +33,16 @@
           'PLHcBUkwitvcMxESxOvZSQY_OZ1qWw9X1U',
           'PLHcBUkwitvcNfuhdyZIO8uldRlQYOndTS'
         ],
-        exportSubfolder: 'Prayers'  // Changed default to 'Prayers'
+        exportSubfolder: 'Prayers',
+        blockMusicVideos: false,
+        disableMusicPlayback: true,
       }, (settings) => {
         PRAYER_TIMEOUT_MS = settings.defaultPrayerTime * 60 * 1000;
         ESSAY_TIMEOUT_MS = settings.extendedPrayerTime * 60 * 1000;
         ALLOWED_PLAYLISTS = new Set(settings.whitelistedSites);
         EXPORT_SUBFOLDER = settings.exportSubfolder;
+        BLOCK_MUSIC_VIDEOS = settings.blockMusicVideos === true;
+        DISABLE_MUSIC_PLAYBACK = settings.disableMusicPlayback !== false;
         resolve();
       });
     });
@@ -55,7 +67,10 @@
     } catch { return ''; }
   }
 
-  // Only block watch pages that are NOT music
+  // Only block watch pages that aren't already whitelisted.
+  // When BLOCK_MUSIC_VIDEOS is on, music videos are *also* blockable
+  // (the toggle's semantic is "should the prayer overlay apply to
+  // music videos?" — ON = yes, OFF = no).
   function isBlockablePage() {
     const path = window.location.pathname;
     const params = new URLSearchParams(window.location.search);
@@ -63,15 +78,19 @@
     if (path !== '/watch' || !params.get('v')) return false;
     // Skip allowed playlists
     if (ALLOWED_PLAYLISTS.has(params.get('list'))) return false;
-    // Skip music videos (category set by detector.js running in MAIN world)
-    if (isMusicVideo()) return false;
     return true;
   }
 
   function isMusicVideo() {
+    // Primary signal: detector.js sets data-yt-music to "yes" / "no" after
+    // checking category, meta genre, title keywords, auto-generated status,
+    // and the verified-artist music badge.
+    const flag = document.documentElement.getAttribute('data-yt-music');
+    if (flag === 'yes') return true;
+    if (flag === 'no') return false;
+    // Fallback (in case detector.js hasn't run yet): category + meta tag
     const cat = document.documentElement.getAttribute('data-yt-category');
     if (cat === 'music') return true;
-    // Fallback: check meta tag
     const genre = document.querySelector('meta[itemprop="genre"]');
     if (genre && genre.content.toLowerCase() === 'music') return true;
     return false;
@@ -206,11 +225,10 @@
       video.addEventListener('pause', markPaused);
       video.addEventListener('ended', markPaused);
       video.addEventListener('seeking', () => { /* ignore — still playing */ });
-      // Treat tab hidden as pause-equivalent so the clock stops when the
-      // user can't actually be watching.
-      document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'hidden') markPaused();
-      });
+      // Do NOT pause the timer on tab hide: when the user returns to a
+      // YouTube tab the timer should keep going. The 5-minute cap in
+      // syncPlayedMs already prevents runaway accumulation if the tab
+      // was suspended for hours.
     };
 
     const tryBind = () => {
@@ -478,6 +496,10 @@
     if (newUrl === lastUrl) return;
     lastUrl = newUrl;
 
+    // Always tear down the previous page's state immediately so a music
+    // video's hidden picture never leaks into a non-music video.
+    stopMusicDisabler();
+
     const path = window.location.pathname;
     const params = new URLSearchParams(window.location.search);
 
@@ -492,6 +514,18 @@
     // Wait for detector.js to update category, then decide
     setTimeout(async () => {
       await waitForCategory();
+
+      // Music disabler runs IN PARALLEL with the prayer overlay: if the
+      // user is on a music video and has the disabler ON, the picture
+      // is hidden (audio keeps playing) whether or not the prayer
+      // overlay is also being shown. Otherwise it is explicitly stopped
+      // so the next video's picture is fully visible.
+      if (DISABLE_MUSIC_PLAYBACK && isMusicVideo()) {
+        ensureMusicDisabler();
+      } else {
+        stopMusicDisabler();
+      }
+
       if (await shouldBlock()) {
         showBlockingOverlay();
       } else {
@@ -504,6 +538,143 @@
   function removeOverlay() {
     const existing = document.getElementById('prayer-overlay');
     if (existing) { existing.remove(); document.documentElement.style.overflow = ''; }
+  }
+
+  // ── Music-video playback disabler ──────────────────────
+  // When DISABLE_MUSIC_PLAYBACK is on and the current page is a music
+  // video, we hide only the VIDEO (picture) while leaving the AUDIO
+  // playing — per the user's request. The <video> element itself is
+  // never paused, muted, or volume-changed; we only inject CSS that
+  // visually hides the player. A small notice confirms the state.
+
+  let musicDisablerActive = false;
+  let musicDisablerObserver = null;
+  let musicDisablerInterval = null;
+
+  function ensureMusicDisabler() {
+    if (!DISABLE_MUSIC_PLAYBACK) { stopMusicDisabler(); return; }
+    if (!isBlockablePage() && !isOnWatch()) return;
+    if (!isMusicVideo()) { stopMusicDisabler(); return; }
+    if (musicDisablerActive) return;
+    musicDisablerActive = true;
+
+    // Show a small notice (separate from the prayer overlay)
+    showMusicBlockedNotice();
+
+    // Hide only the visual player; audio keeps playing
+    applyDisableVisuals();
+
+    // Re-apply visuals on every DOM rebuild so YouTube's SPA nav can't
+    // bring the video back without us noticing
+    if (!musicDisablerObserver && document.body) {
+      musicDisablerObserver = new MutationObserver(applyDisableVisuals);
+      musicDisablerObserver.observe(document.body, { childList: true, subtree: true });
+    }
+
+    // Defensive periodic re-apply
+    if (!musicDisablerInterval) {
+      musicDisablerInterval = setInterval(() => {
+        if (!isMusicVideo() || !DISABLE_MUSIC_PLAYBACK) {
+          stopMusicDisabler();
+          return;
+        }
+        applyDisableVisuals();
+      }, 1500);
+    }
+  }
+
+  function isOnWatch() {
+    return window.location.pathname === '/watch' && !!new URLSearchParams(window.location.search).get('v');
+  }
+
+  function applyDisableVisuals() {
+    if (!musicDisablerActive) return;
+    // Inject the hide style if missing. We hide ONLY the picture — the
+    // <video> element is collapsed, but its audio track keeps decoding.
+    // The title, channel, description, and player controls remain
+    // visible (the .html5-video-player container holds the controls;
+    // we keep it rendered so playback controls stay accessible).
+    let dim = document.getElementById('prayer-music-dim');
+    if (!dim) {
+      dim = document.createElement('style');
+      dim.id = 'prayer-music-dim';
+      dim.textContent = [
+        // Collapse the video frame so the picture is gone, but leave
+        // the controls/chrome (so the user can still pause etc.).
+        '#movie_player video,',
+        'ytd-watch-flexy #player-container-outer video,',
+        'ytd-watch-flexy #player-container-inner video,',
+        'ytd-miniplayer-player video {',
+        '  visibility: hidden !important;',
+        '  width: 1px !important; height: 1px !important;',
+        '  position: absolute !important; left: -9999px !important;',
+        '}'
+      ].join('\n');
+      document.documentElement.appendChild(dim);
+    }
+  }
+
+  function showMusicBlockedNotice() {
+    if (document.getElementById('prayer-music-notice')) return;
+    const el = document.createElement('div');
+    el.id = 'prayer-music-notice';
+    el.textContent = '🎵 Video Hidden (Audio Only)';
+    // Anchor inside the movie_player so it stays locked to the player
+    // box even when the page scrolls. The element is absolutely
+    // positioned within the player; it ignores pointer events so it
+    // never blocks interaction with the controls underneath.
+    el.style.cssText = [
+      'position:absolute',
+      'top:50%', 'left:50%',
+      'transform:translate(-50%,-50%)',
+      'z-index:50',
+      'background:linear-gradient(135deg,#4d66d9,#5c3582)',
+      'color:white',
+      'padding:14px 20px',
+      'border-radius:12px',
+      'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif',
+      'font-size:15px', 'font-weight:600',
+      'box-shadow:0 8px 24px rgba(0,0,0,0.5)',
+      'pointer-events:none',
+      'white-space:nowrap'
+    ].join(';');
+
+    // Inject into the player so it scrolls WITH the video frame.
+    // If the player isn't in the DOM yet, fall back to documentElement.
+    const host = document.querySelector('#movie_player')
+              || document.getElementById('player')
+              || document.documentElement;
+    // Make sure the host can host an absolutely-positioned child
+    const cs = window.getComputedStyle(host);
+    if (cs.position === 'static') {
+      host.style.position = 'relative';
+    }
+    host.appendChild(el);
+  }
+
+  function stopMusicDisabler() {
+    if (!musicDisablerActive) return;
+    musicDisablerActive = false;
+    if (musicDisablerObserver) { musicDisablerObserver.disconnect(); musicDisablerObserver = null; }
+    if (musicDisablerInterval) { clearInterval(musicDisablerInterval); musicDisablerInterval = null; }
+    const dim = document.getElementById('prayer-music-dim');
+    if (dim) dim.remove();
+    const notice = document.getElementById('prayer-music-notice');
+    if (notice) notice.remove();
+  }
+
+  // Watch the data-yt-music attribute so SPA navigations that flip the
+  // music flag re-evaluate the disabler without a full page reload.
+  function watchMusicFlag() {
+    const target = document.documentElement;
+    const obs = new MutationObserver(() => {
+      if (DISABLE_MUSIC_PLAYBACK) {
+        // Either direction: ensure correct state
+        if (isMusicVideo()) ensureMusicDisabler();
+        else stopMusicDisabler();
+      }
+    });
+    obs.observe(target, { attributes: true, attributeFilter: ['data-yt-music', 'data-yt-category'] });
   }
 
   new MutationObserver(onUrlChange).observe(document, { subtree: true, childList: true });
@@ -522,12 +693,30 @@
     }
   });
 
+  // ── React to settings changes (so the switches take effect live) ──
+
+  chrome.storage.onChanged.addListener((changes, namespace) => {
+    if (namespace !== 'local') return;
+    if (changes.blockMusicVideos) {
+      BLOCK_MUSIC_VIDEOS = changes.blockMusicVideos.newValue === true;
+    }
+    if (changes.disableMusicPlayback) {
+      DISABLE_MUSIC_PLAYBACK = changes.disableMusicPlayback.newValue !== false;
+      if (DISABLE_MUSIC_PLAYBACK) ensureMusicDisabler();
+      else stopMusicDisabler();
+    }
+  });
+
   // ── Initial load ──────────────────────────────────────
 
   async function init() {
     // Load settings first
     await loadSettings();
-    
+
+    // Watch the music-flag attribute so SPA navigations trigger the
+    // playback-disabler when needed.
+    watchMusicFlag();
+
     const path = window.location.pathname;
     const params = new URLSearchParams(window.location.search);
 
@@ -547,12 +736,18 @@
     // Wait for detector.js to provide the category
     await waitForCategory();
 
-    // If it's music, just show the page
-    if (isMusicVideo()) {
-      revealPage();
-      return;
+    // Activate the music-video playback disabler (if enabled) for any
+    // music video, regardless of whether the prayer overlay will also
+    // appear. The disabler only hides the picture; audio keeps playing.
+    if (DISABLE_MUSIC_PLAYBACK && isMusicVideo()) {
+      ensureMusicDisabler();
+    } else {
+      stopMusicDisabler();
     }
 
+    // Decide prayer-block path. Music videos are skipped from the
+    // overlay only when BLOCK_MUSIC_VIDEOS is on; with the default
+    // setting (ON), the prayer overlay never appears for music videos.
     if (await shouldBlock()) {
       const show = () => {
         showBlockingOverlay();

@@ -1,11 +1,11 @@
 // Background service worker for YouTube Prayer Blocker (Chrome)
 
-let EXPORT_SUBFOLDER = 'Prayers';  // Changed default to 'Prayers'
+let EXPORT_SUBFOLDER = 'Prayers';
 const EXPORT_FILENAME = 'Prayers.txt';
 let customExportDirectoryHandle = null;
 
 // Load settings on startup
-chrome.storage.local.get({ exportSubfolder: 'Prayers' }, (result) => {  // Changed default
+chrome.storage.local.get({ exportSubfolder: 'Prayers' }, (result) => {
   EXPORT_SUBFOLDER = result.exportSubfolder || 'Prayers';
 });
 
@@ -33,11 +33,25 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
   }
 });
 
-// ── Export journal as a download ─────────────────────────
-// Append-only: only entries not yet exported are written.
-// Saves to {exportSubfolder}/Prayers.txt (FS API path appends to the
-// existing file; the Downloads fallback writes new entries to a new
-// timestamped file so Prayers.txt is never overwritten).
+// ── Build the full Prayers.txt content from the journal ─────────
+//
+// `prayerJournal` is the single source of truth. Every export rebuilds
+// the whole file from it and overwrites Prayers.txt on disk, so the
+// filename is always stable (no Prayers-{timestamp}.txt shenanigans
+// on Chrome). lastExportedId is tracked only to short-circuit when
+// nothing has changed.
+
+function buildJournalText(prayers) {
+  // Oldest first so the file reads chronologically
+  const sorted = [...prayers].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  let txt = '';
+  sorted.forEach(p => {
+    txt += `${p.date} at ${p.time}${p.type === 'essay' ? ' [Essay]' : ''}\n`;
+    txt += '-'.repeat(50) + '\n';
+    txt += p.text + '\n\n';
+  });
+  return txt;
+}
 
 async function exportJournal() {
   const result = await chrome.storage.local.get({
@@ -45,26 +59,19 @@ async function exportJournal() {
     lastExportedId: 0
   });
   const prayers = result.prayerJournal || [];
+
+  // Skip the write only if the journal is empty (nothing to write) or
+  // if nothing has changed since the last export. We rebuild the whole
+  // file every time we write, so the on-disk content always matches
+  // the journal exactly.
   const lastId = result.lastExportedId || 0;
+  const newestId = prayers.reduce((m, p) => Math.max(m, p.id || 0), 0);
+  if (!prayers.length) return;
+  if (newestId <= lastId) return;
 
-  // Only export entries we haven't exported yet
-  const newEntries = prayers.filter(p => (p.id || 0) > lastId);
-  if (!newEntries.length) return;
+  const txt = buildJournalText(prayers);
 
-  // Oldest first so the file reads chronologically
-  newEntries.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-
-  let txt = '';
-  newEntries.forEach(p => {
-    txt += `${p.date} at ${p.time}${p.type === 'essay' ? ' [Essay]' : ''}\n`;
-    txt += '-'.repeat(50) + '\n';
-    txt += p.text + '\n\n';
-  });
-
-  const blob = new Blob([txt], { type: 'text/plain' });
-  const maxId = newEntries.reduce((m, p) => Math.max(m, p.id || 0), lastId);
-
-  // If custom export folder is set, use File System Access API (append)
+  // Prefer the File System Access API folder if the user chose one
   if (customExportDirectoryHandle) {
     try {
       const permission = await customExportDirectoryHandle.queryPermission({ mode: 'readwrite' });
@@ -72,56 +79,54 @@ async function exportJournal() {
         const granted = await customExportDirectoryHandle.requestPermission({ mode: 'readwrite' });
         if (granted !== 'granted') {
           console.log('Permission denied for custom export folder, falling back to Downloads');
-          return downloadNewEntries(blob, maxId);
+          return overwriteDownloads(txt, newestId);
         }
       }
-
-      // Read existing content (if any) so we can append rather than overwrite
-      let existing = '';
-      try {
-        const readHandle = await customExportDirectoryHandle.getFileHandle(EXPORT_FILENAME);
-        const file = await readHandle.getFile();
-        existing = await file.text();
-      } catch (e) {
-        // File doesn't exist yet — that's fine, we'll create it
-      }
-
       const fileHandle = await customExportDirectoryHandle.getFileHandle(EXPORT_FILENAME, { create: true });
       const writable = await fileHandle.createWritable();
-      const fullContent = existing ? existing + '\n' + txt : txt;
-      await writable.write(fullContent);
+      await writable.write(txt);
       await writable.close();
-
-      await chrome.storage.local.set({ lastExportedId: maxId });
-      console.log('Prayer journal appended to custom folder');
+      await chrome.storage.local.set({ lastExportedId: newestId });
+      console.log('Prayer journal written to custom folder');
       return;
     } catch (err) {
       console.error('Failed to write to custom folder, falling back to Downloads:', err);
-      return downloadNewEntries(blob, maxId);
+      return overwriteDownloads(txt, newestId);
     }
   }
 
-  // Fallback to Downloads folder (can't append, so write a new file)
-  return downloadNewEntries(blob, maxId);
+  // Fallback: write directly to Downloads as a stable filename
+  return overwriteDownloads(txt, newestId);
 }
 
-function downloadNewEntries(blob, maxId) {
-  const reader = new FileReader();
-  reader.onloadend = () => {
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const base = EXPORT_SUBFOLDER ? `${EXPORT_SUBFOLDER}/` : '';
-    const fullPath = `${base}Prayers-${stamp}.txt`;
+// Always write to {EXPORT_SUBFOLDER}/Prayers.txt with overwrite so the
+// filename is stable. This avoids the timestamped Prayers-{stamp}.txt
+// filenames Chrome was producing under the old per-entry append path.
+async function overwriteDownloads(txt, newestId) {
+  const base = EXPORT_SUBFOLDER ? `${EXPORT_SUBFOLDER}/` : '';
+  const filename = `${base}${EXPORT_FILENAME}`;
+  const blob = new Blob([txt], { type: 'text/plain' });
+  await downloadBlob(blob, filename, 'overwrite');
+  await chrome.storage.local.set({ lastExportedId: newestId });
+}
 
-    chrome.downloads.download({
-      url: reader.result,
-      filename: fullPath,
-      conflictAction: 'uniquify',
-      saveAs: false
-    }, () => {
-      chrome.storage.local.set({ lastExportedId: maxId });
-    });
-  };
-  reader.readAsDataURL(blob);
+function downloadBlob(blob, filename, conflictAction) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      chrome.downloads.download({
+        url: reader.result,
+        filename,
+        conflictAction,
+        saveAs: false
+      }, (downloadId) => {
+        const err = chrome.runtime.lastError;
+        if (err) reject(err); else resolve(downloadId);
+      });
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
 }
 
 // ── Listen for export requests (from content script or popup) ────
