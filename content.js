@@ -527,10 +527,10 @@
 
   // ── Music-video playback disabler ──────────────────────
   // When DISABLE_MUSIC_PLAYBACK is on and the current page is a music
-  // video, we forcefully pause the <video> element, mute it, hide the
-  // player, and show a small notice. We re-apply these on every new
-  // <video> element (YouTube rebuilds them on SPA nav) via a DOM
-  // observer.
+  // video, we hide only the VIDEO (picture) while leaving the AUDIO
+  // playing — per the user's request. The <video> element itself is
+  // never paused, muted, or volume-changed; we only inject CSS that
+  // visually hides the player. A small notice confirms the state.
 
   let musicDisablerActive = false;
   let musicDisablerObserver = null;
@@ -546,23 +546,24 @@
     // Show a small notice (separate from the prayer overlay)
     showMusicBlockedNotice();
 
-    // Apply disable to any existing <video>
-    applyDisableToAllVideos();
+    // Hide only the visual player; audio keeps playing
+    applyDisableVisuals();
 
-    // Watch for new <video> elements
+    // Re-apply visuals on every DOM rebuild so YouTube's SPA nav can't
+    // bring the video back without us noticing
     if (!musicDisablerObserver && document.body) {
-      musicDisablerObserver = new MutationObserver(applyDisableToAllVideos);
+      musicDisablerObserver = new MutationObserver(applyDisableVisuals);
       musicDisablerObserver.observe(document.body, { childList: true, subtree: true });
     }
 
-    // Defensive periodic re-apply (some YouTube players resume after seek)
+    // Defensive periodic re-apply
     if (!musicDisablerInterval) {
       musicDisablerInterval = setInterval(() => {
         if (!isMusicVideo() || !DISABLE_MUSIC_PLAYBACK) {
           stopMusicDisabler();
           return;
         }
-        applyDisableToAllVideos();
+        applyDisableVisuals();
       }, 1500);
     }
   }
@@ -571,29 +572,29 @@
     return window.location.pathname === '/watch' && !!new URLSearchParams(window.location.search).get('v');
   }
 
-  function applyDisableToAllVideos() {
+  function applyDisableVisuals() {
     if (!musicDisablerActive) return;
-    document.querySelectorAll('video').forEach(v => {
-      try {
-        v.muted = true;
-        v.volume = 0;
-        v.pause();
-        v.removeAttribute('autoplay');
-        // Prevent future plays
-        if (!v.__musicDisablerBound) {
-          v.__musicDisablerBound = true;
-          v.addEventListener('play', (e) => {
-            try { e.target.pause(); e.target.muted = true; e.target.volume = 0; } catch {}
-          }, true);
-        }
-      } catch { /* ignore */ }
-    });
-    // Dim the main player area so the page isn't fully blank
+    // Inject the hide style if missing. This hides the main player and
+    // any inline player container visually only — audio is untouched.
     let dim = document.getElementById('prayer-music-dim');
     if (!dim) {
       dim = document.createElement('style');
       dim.id = 'prayer-music-dim';
-      dim.textContent = '#movie_player { filter: blur(12px) brightness(0.4) !important; pointer-events: none !important; }';
+      // Hide the video element itself, the main player, and the
+      // miniplayer / inline-playback containers. Audio is unaffected.
+      dim.textContent = [
+        '#movie_player, ytd-watch-flexy #player-container-outer,',
+        'ytd-watch-flexy #player-container-inner,',
+        'ytd-watch-flexy #below, ytd-watch-flexy #player,',
+        'ytd-miniplayer-player, .html5-video-player {',
+        '  visibility: hidden !important;',
+        '  height: 0 !important; min-height: 0 !important;',
+        '  overflow: hidden !important;',
+        '}',
+        // Keep the <video> element itself rendered (visibility:visible)
+        // so its audio track keeps decoding and reaching the speakers.
+        'video { visibility: visible !important; }'
+      ].join('\n');
       document.documentElement.appendChild(dim);
     }
   }
@@ -602,7 +603,7 @@
     if (document.getElementById('prayer-music-notice')) return;
     const el = document.createElement('div');
     el.id = 'prayer-music-notice';
-    el.textContent = '🎵 Music playback disabled';
+    el.textContent = '🎵 Video hidden — audio playing';
     el.style.cssText = [
       'position:fixed', 'top:16px', 'right:16px', 'z-index:999999998',
       'background:linear-gradient(135deg,#4d66d9,#5c3582)',

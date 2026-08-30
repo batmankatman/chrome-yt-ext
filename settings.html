@@ -336,7 +336,7 @@
   <!-- <p class="subtitle">Manage your YouTube Prayer Blocker settings</p> -->
 
   <div class="spacer"><i>Ask God about what would be best to help you choose your time wisely 😎</i></div>
-    <div style="height: 20px;"></div>  
+    <div style="height: 50px;"></div>  
   <div class="section">
     <div class="section-title">Prayer Times</div>
     <div class="time-row">
@@ -350,6 +350,16 @@
         <input type="number" id="extended-prayer-time" min="1" value="20">
         <small>Essay (50+ words) duration. Timer carries across videos.</small>
       </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Whitelisted Videos & PlaylistIDs</div>
+    <div class="setting-item">
+      <small>These are never blocked. Click a preview to edit its URL.</small>
+        <div style="height: 20px;"></div>
+      <div id="url-list"></div>
+      <button class="url-add-btn" id="add-url-btn">+ Add URL</button>
     </div>
   </div>
 
@@ -375,17 +385,7 @@
           <span class="switch-slider"></span>
         </span>
       </label>
-      <small>When ON, music videos are detected and their playback is forcefully disabled (muted, paused, and dimmed). Detection uses the video category, the &lt;meta&gt; genre, the title, whether the video is auto-generated, and whether the artist has a verified-music badge. When OFF, no playback is disabled.</small>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-title">Whitelisted Videos.PlaylistIDs</div>
-    <div class="setting-item">
-      <small>These are never blocked. Click a preview to edit its URL.</small>
-        <div style="height: 20px;"></div>  
-      <div id="url-list"></div>
-      <button class="url-add-btn" id="add-url-btn">+ Add URL</button>
+      <small>When ON, music videos are detected and only the <strong>video</strong> (picture) is hidden while the <strong>audio keeps playing</strong>. Detection uses the video category, the &lt;meta&gt; genre, the title, whether the video is auto-generated, and whether the artist has a verified-music badge. When OFF, no video is disabled.</small>
     </div>
   </div>
 
