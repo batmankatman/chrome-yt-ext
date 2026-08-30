@@ -508,14 +508,22 @@
     // Wait for detector.js to update category, then decide
     setTimeout(async () => {
       await waitForCategory();
+
+      // Music disabler runs IN PARALLEL with the prayer overlay: if the
+      // user is on a music video and has the disabler ON, the picture
+      // is hidden (audio keeps playing) whether or not the prayer
+      // overlay is also being shown.
+      if (DISABLE_MUSIC_PLAYBACK && isMusicVideo()) {
+        ensureMusicDisabler();
+      } else {
+        stopMusicDisabler();
+      }
+
       if (await shouldBlock()) {
         showBlockingOverlay();
-        stopMusicDisabler();
       } else {
         removeOverlay();
         attachPlaybackListeners();
-        if (DISABLE_MUSIC_PLAYBACK) ensureMusicDisabler();
-        else stopMusicDisabler();
       }
     }, 400); // small delay so detector.js can update
   }
@@ -699,21 +707,18 @@
     // Wait for detector.js to provide the category
     await waitForCategory();
 
-    // If the music-disabler is on AND this is a music video, activate
-    // it. The prayer-block path is skipped (this video is a music video,
-    // and the user has chosen to disable music playback rather than pray).
+    // Activate the music-video playback disabler (if enabled) for any
+    // music video, regardless of whether the prayer overlay will also
+    // appear. The disabler only hides the picture; audio keeps playing.
     if (DISABLE_MUSIC_PLAYBACK && isMusicVideo()) {
-      revealPage();
       ensureMusicDisabler();
-      return;
+    } else {
+      stopMusicDisabler();
     }
 
-    // If it's music (and disabler is off), reveal the page normally
-    if (isMusicVideo()) {
-      revealPage();
-      return;
-    }
-
+    // Decide prayer-block path. Music videos are skipped from the
+    // overlay only when BLOCK_MUSIC_VIDEOS is on; with the default
+    // setting (ON), the prayer overlay never appears for music videos.
     if (await shouldBlock()) {
       const show = () => {
         showBlockingOverlay();
