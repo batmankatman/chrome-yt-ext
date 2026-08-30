@@ -452,6 +452,134 @@ chooseDirBtn.addEventListener('click', async () => {
   }
 });
 
+// ── Import an existing Prayers.txt ─────────────────────────────
+//
+// Chrome MV3 service workers cannot read files in the user's Downloads
+// folder directly, so on a fresh computer the only way to bootstrap the
+// journal with existing entries is to let the user paste / upload the
+// old Prayers.txt here. We parse it back into prayerJournal entries
+// and assign fresh IDs. The next export will rebuild Prayers.txt with
+// the combined set, so existing prayers from another computer are
+// never lost.
+
+function parsePrayersTxt(text) {
+  // Each entry looks like:
+  //   <date> at <time>[ [Essay]]
+  //   --------------------------------------------------
+  //   <prayer body>
+  //   <blank line>
+  //   (next entry...)
+  // We parse line-by-line: each line matching `<...> at <...> [Essay]`
+  // starts a new entry; the body is everything between that line's
+  // dashed separator and the next header line or end-of-file.
+  const normalized = text.replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n');
+  const headerRe = /^(.+?)\s+at\s+(.+?)(?:\s+\[Essay\])?\s*$/;
+  const entries = [];
+  let i = 0;
+  while (i < lines.length) {
+    const m = lines[i].match(headerRe);
+    if (!m) { i++; continue; }
+    const header = lines[i];
+    const date = m[1];
+    const time = m[2];
+    const isEssay = /\[Essay\]/.test(header);
+    i++;
+    // Skip any blank lines, then a dashed separator line
+    while (i < lines.length && !lines[i].trim()) i++;
+    if (i < lines.length && /^-+$/.test(lines[i].trim())) i++;
+    // Body runs until a blank line OR the next header
+    const bodyLines = [];
+    while (i < lines.length) {
+      const l = lines[i];
+      if (!l.trim()) break;
+      if (headerRe.test(l)) break;
+      bodyLines.push(l);
+      i++;
+    }
+    const body = bodyLines.join('\n').trim();
+    if (!body) continue;
+    // Reconstruct timestamp; if the date/time doesn't parse, leave it
+    // as-is and rely on the dedupe-by-text pass below.
+    let ts = Date.now();
+    try {
+      const parsed = new Date(`${date} ${time}`);
+      if (!isNaN(parsed.getTime())) ts = parsed.getTime();
+    } catch {}
+    entries.push({
+      text: body,
+      type: isEssay ? 'essay' : 'prayer',
+      date,
+      time,
+      timestamp: ts,
+    });
+  }
+  return entries;
+}
+
+async function importPrayersTxt(text) {
+  const parsed = parsePrayersTxt(text);
+  if (!parsed.length) {
+    showStatus('No prayer entries found in that file.');
+    return;
+  }
+  const { prayerJournal = [] } = await new Promise(r =>
+    chrome.storage.local.get({ prayerJournal: [] }, r)
+  );
+  const maxId = prayerJournal.reduce((m, p) => Math.max(m, p.id || 0), 0);
+  // Dedupe: skip imports that already match an existing entry
+  // (same timestamp + same text). Assign fresh IDs to the new ones.
+  const existingKeys = new Set(
+    prayerJournal.map(p => `${p.timestamp}|${(p.text || '').trim()}`)
+  );
+  let nextId = maxId;
+  let added = 0;
+  for (const e of parsed) {
+    const key = `${e.timestamp}|${e.text.trim()}`;
+    if (existingKeys.has(key)) continue;
+    e.id = ++nextId;
+    prayerJournal.unshift(e);
+    existingKeys.add(key);
+    added++;
+  }
+  if (!added) {
+    showStatus('No new entries — already imported.');
+    return;
+  }
+  await new Promise(r =>
+    chrome.storage.local.set({ prayerJournal }, r)
+  );
+  // Reset lastExportedId so the next export treats the combined journal
+  // as freshly needing to be written.
+  await new Promise(r =>
+    chrome.storage.local.set({ lastExportedId: 0 }, r)
+  );
+  showStatus(`Imported ${added} prayer${added === 1 ? '' : 's'}.`);
+  // Trigger a re-export so the file on disk reflects the merged set.
+  try {
+    chrome.runtime.sendMessage({ action: 'exportJournal' });
+  } catch {}
+}
+
+// Wire up the Import button + auto-import on file selection
+const importFileInput = document.getElementById('import-file');
+const importFileBtn = document.getElementById('import-file-btn');
+if (importFileBtn && importFileInput) {
+  importFileBtn.addEventListener('click', async () => {
+    if (!importFileInput.files || !importFileInput.files.length) {
+      showStatus('Pick a .txt file first.');
+      return;
+    }
+    const file = importFileInput.files[0];
+    const text = await file.text();
+    if (!confirm(`Import this file? It will be merged into your journal (existing entries are kept, duplicates skipped). This cannot be undone.`)) {
+      return;
+    }
+    await importPrayersTxt(text);
+    importFileInput.value = '';
+  });
+}
+
 saveBtn.addEventListener('click', () => {
   saveSettings();
 });

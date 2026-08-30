@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Prayer Blocker",
-  "version": "1.5",
+  "version": "1.6",
   "description": "Blocks YouTube until a prayer is entered. Includes prayer journal with auto-export.",
   "permissions": [
     "storage",
