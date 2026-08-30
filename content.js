@@ -12,7 +12,11 @@
     'PLHcBUkwitvcMxESxOvZSQY_OZ1qWw9X1U',
     'PLHcBUkwitvcNfuhdyZIO8uldRlQYOndTS',
   ]);
-  let EXPORT_SUBFOLDER = 'Prayers';  // Changed default to 'Prayers'
+  let EXPORT_SUBFOLDER = 'Prayers';
+  // Prayer blocking for music videos. Default ON (existing behavior).
+  let BLOCK_MUSIC_VIDEOS = true;
+  // Hard-disable playback for music videos. Default OFF.
+  let DISABLE_MUSIC_PLAYBACK = false;
 
   // Load settings from storage
   function loadSettings() {
@@ -25,12 +29,16 @@
           'PLHcBUkwitvcMxESxOvZSQY_OZ1qWw9X1U',
           'PLHcBUkwitvcNfuhdyZIO8uldRlQYOndTS'
         ],
-        exportSubfolder: 'Prayers'  // Changed default to 'Prayers'
+        exportSubfolder: 'Prayers',
+        blockMusicVideos: true,
+        disableMusicPlayback: false,
       }, (settings) => {
         PRAYER_TIMEOUT_MS = settings.defaultPrayerTime * 60 * 1000;
         ESSAY_TIMEOUT_MS = settings.extendedPrayerTime * 60 * 1000;
         ALLOWED_PLAYLISTS = new Set(settings.whitelistedSites);
         EXPORT_SUBFOLDER = settings.exportSubfolder;
+        BLOCK_MUSIC_VIDEOS = settings.blockMusicVideos !== false;
+        DISABLE_MUSIC_PLAYBACK = settings.disableMusicPlayback === true;
         resolve();
       });
     });
@@ -55,7 +63,7 @@
     } catch { return ''; }
   }
 
-  // Only block watch pages that are NOT music
+  // Only block watch pages that are NOT music (when BLOCK_MUSIC_VIDEOS is on)
   function isBlockablePage() {
     const path = window.location.pathname;
     const params = new URLSearchParams(window.location.search);
@@ -63,15 +71,22 @@
     if (path !== '/watch' || !params.get('v')) return false;
     // Skip allowed playlists
     if (ALLOWED_PLAYLISTS.has(params.get('list'))) return false;
-    // Skip music videos (category set by detector.js running in MAIN world)
-    if (isMusicVideo()) return false;
+    // Skip music videos only if the user has the music-block switch ON.
+    // When the switch is OFF, music videos are blockable like any other.
+    if (BLOCK_MUSIC_VIDEOS && isMusicVideo()) return false;
     return true;
   }
 
   function isMusicVideo() {
+    // Primary signal: detector.js sets data-yt-music to "yes" / "no" after
+    // checking category, meta genre, title keywords, auto-generated status,
+    // and the verified-artist music badge.
+    const flag = document.documentElement.getAttribute('data-yt-music');
+    if (flag === 'yes') return true;
+    if (flag === 'no') return false;
+    // Fallback (in case detector.js hasn't run yet): category + meta tag
     const cat = document.documentElement.getAttribute('data-yt-category');
     if (cat === 'music') return true;
-    // Fallback: check meta tag
     const genre = document.querySelector('meta[itemprop="genre"]');
     if (genre && genre.content.toLowerCase() === 'music') return true;
     return false;
@@ -486,6 +501,7 @@
       removeOverlay();
       disableAutoplayPreviews();
       detachPlaybackListeners();
+      stopMusicDisabler();
       return;
     }
 
@@ -494,9 +510,12 @@
       await waitForCategory();
       if (await shouldBlock()) {
         showBlockingOverlay();
+        stopMusicDisabler();
       } else {
         removeOverlay();
         attachPlaybackListeners();
+        if (DISABLE_MUSIC_PLAYBACK) ensureMusicDisabler();
+        else stopMusicDisabler();
       }
     }, 400); // small delay so detector.js can update
   }
@@ -504,6 +523,120 @@
   function removeOverlay() {
     const existing = document.getElementById('prayer-overlay');
     if (existing) { existing.remove(); document.documentElement.style.overflow = ''; }
+  }
+
+  // ── Music-video playback disabler ──────────────────────
+  // When DISABLE_MUSIC_PLAYBACK is on and the current page is a music
+  // video, we forcefully pause the <video> element, mute it, hide the
+  // player, and show a small notice. We re-apply these on every new
+  // <video> element (YouTube rebuilds them on SPA nav) via a DOM
+  // observer.
+
+  let musicDisablerActive = false;
+  let musicDisablerObserver = null;
+  let musicDisablerInterval = null;
+
+  function ensureMusicDisabler() {
+    if (!DISABLE_MUSIC_PLAYBACK) { stopMusicDisabler(); return; }
+    if (!isBlockablePage() && !isOnWatch()) return;
+    if (!isMusicVideo()) { stopMusicDisabler(); return; }
+    if (musicDisablerActive) return;
+    musicDisablerActive = true;
+
+    // Show a small notice (separate from the prayer overlay)
+    showMusicBlockedNotice();
+
+    // Apply disable to any existing <video>
+    applyDisableToAllVideos();
+
+    // Watch for new <video> elements
+    if (!musicDisablerObserver && document.body) {
+      musicDisablerObserver = new MutationObserver(applyDisableToAllVideos);
+      musicDisablerObserver.observe(document.body, { childList: true, subtree: true });
+    }
+
+    // Defensive periodic re-apply (some YouTube players resume after seek)
+    if (!musicDisablerInterval) {
+      musicDisablerInterval = setInterval(() => {
+        if (!isMusicVideo() || !DISABLE_MUSIC_PLAYBACK) {
+          stopMusicDisabler();
+          return;
+        }
+        applyDisableToAllVideos();
+      }, 1500);
+    }
+  }
+
+  function isOnWatch() {
+    return window.location.pathname === '/watch' && !!new URLSearchParams(window.location.search).get('v');
+  }
+
+  function applyDisableToAllVideos() {
+    if (!musicDisablerActive) return;
+    document.querySelectorAll('video').forEach(v => {
+      try {
+        v.muted = true;
+        v.volume = 0;
+        v.pause();
+        v.removeAttribute('autoplay');
+        // Prevent future plays
+        if (!v.__musicDisablerBound) {
+          v.__musicDisablerBound = true;
+          v.addEventListener('play', (e) => {
+            try { e.target.pause(); e.target.muted = true; e.target.volume = 0; } catch {}
+          }, true);
+        }
+      } catch { /* ignore */ }
+    });
+    // Dim the main player area so the page isn't fully blank
+    let dim = document.getElementById('prayer-music-dim');
+    if (!dim) {
+      dim = document.createElement('style');
+      dim.id = 'prayer-music-dim';
+      dim.textContent = '#movie_player { filter: blur(12px) brightness(0.4) !important; pointer-events: none !important; }';
+      document.documentElement.appendChild(dim);
+    }
+  }
+
+  function showMusicBlockedNotice() {
+    if (document.getElementById('prayer-music-notice')) return;
+    const el = document.createElement('div');
+    el.id = 'prayer-music-notice';
+    el.textContent = '🎵 Music playback disabled';
+    el.style.cssText = [
+      'position:fixed', 'top:16px', 'right:16px', 'z-index:999999998',
+      'background:linear-gradient(135deg,#4d66d9,#5c3582)',
+      'color:white', 'padding:10px 14px', 'border-radius:8px',
+      'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif',
+      'font-size:13px', 'font-weight:600',
+      'box-shadow:0 6px 20px rgba(0,0,0,0.4)'
+    ].join(';');
+    document.documentElement.appendChild(el);
+  }
+
+  function stopMusicDisabler() {
+    if (!musicDisablerActive) return;
+    musicDisablerActive = false;
+    if (musicDisablerObserver) { musicDisablerObserver.disconnect(); musicDisablerObserver = null; }
+    if (musicDisablerInterval) { clearInterval(musicDisablerInterval); musicDisablerInterval = null; }
+    const dim = document.getElementById('prayer-music-dim');
+    if (dim) dim.remove();
+    const notice = document.getElementById('prayer-music-notice');
+    if (notice) notice.remove();
+  }
+
+  // Watch the data-yt-music attribute so SPA navigations that flip the
+  // music flag re-evaluate the disabler without a full page reload.
+  function watchMusicFlag() {
+    const target = document.documentElement;
+    const obs = new MutationObserver(() => {
+      if (DISABLE_MUSIC_PLAYBACK) {
+        // Either direction: ensure correct state
+        if (isMusicVideo()) ensureMusicDisabler();
+        else stopMusicDisabler();
+      }
+    });
+    obs.observe(target, { attributes: true, attributeFilter: ['data-yt-music', 'data-yt-category'] });
   }
 
   new MutationObserver(onUrlChange).observe(document, { subtree: true, childList: true });
@@ -522,12 +655,30 @@
     }
   });
 
+  // ── React to settings changes (so the switches take effect live) ──
+
+  chrome.storage.onChanged.addListener((changes, namespace) => {
+    if (namespace !== 'local') return;
+    if (changes.blockMusicVideos) {
+      BLOCK_MUSIC_VIDEOS = changes.blockMusicVideos.newValue !== false;
+    }
+    if (changes.disableMusicPlayback) {
+      DISABLE_MUSIC_PLAYBACK = changes.disableMusicPlayback.newValue === true;
+      if (DISABLE_MUSIC_PLAYBACK) ensureMusicDisabler();
+      else stopMusicDisabler();
+    }
+  });
+
   // ── Initial load ──────────────────────────────────────
 
   async function init() {
     // Load settings first
     await loadSettings();
-    
+
+    // Watch the music-flag attribute so SPA navigations trigger the
+    // playback-disabler when needed.
+    watchMusicFlag();
+
     const path = window.location.pathname;
     const params = new URLSearchParams(window.location.search);
 
@@ -547,7 +698,16 @@
     // Wait for detector.js to provide the category
     await waitForCategory();
 
-    // If it's music, just show the page
+    // If the music-disabler is on AND this is a music video, activate
+    // it. The prayer-block path is skipped (this video is a music video,
+    // and the user has chosen to disable music playback rather than pray).
+    if (DISABLE_MUSIC_PLAYBACK && isMusicVideo()) {
+      revealPage();
+      ensureMusicDisabler();
+      return;
+    }
+
+    // If it's music (and disabler is off), reveal the page normally
     if (isMusicVideo()) {
       revealPage();
       return;

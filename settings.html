@@ -79,6 +79,60 @@
     .time-row .setting-item input {
       width: 100%;
     }
+
+    /* ── iOS-style switch ──────────────────────────── */
+    .switch-item { margin-bottom: 14px; }
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      cursor: pointer;
+      margin-bottom: 6px;
+    }
+    .switch-label {
+      font-size: 13px;
+      color: #e2e2ee;
+      font-weight: 500;
+      flex: 1;
+      min-width: 0;
+    }
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 42px;
+      height: 24px;
+      flex: 0 0 auto;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch-slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #3a3a52;
+      transition: background-color 0.2s ease;
+      border-radius: 24px;
+    }
+    .switch-slider::before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      top: 3px;
+      background-color: #fff;
+      transition: transform 0.2s ease;
+      border-radius: 50%;
+    }
+    .switch input:checked + .switch-slider {
+      background-color: #4d66d9;
+    }
+    .switch input:checked + .switch-slider::before {
+      transform: translateX(18px);
+    }
+    .switch input:focus + .switch-slider {
+      box-shadow: 0 0 0 2px rgba(77, 102, 217, 0.4);
+    }
     .url-row {
       display: flex;
       align-items: center;
@@ -296,6 +350,32 @@
         <input type="number" id="extended-prayer-time" min="1" value="20">
         <small>Essay (50+ words) duration. Timer carries across videos.</small>
       </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Music Videos</div>
+
+    <div class="setting-item switch-item">
+      <label class="switch-row" for="block-music-videos">
+        <span class="switch-label">Block prayer prompts on music videos</span>
+        <span class="switch">
+          <input type="checkbox" id="block-music-videos" checked>
+          <span class="switch-slider"></span>
+        </span>
+      </label>
+      <small>When ON (default), music videos are treated as exempt from the prayer overlay. When OFF, music videos behave like any other video.</small>
+    </div>
+
+    <div class="setting-item switch-item">
+      <label class="switch-row" for="disable-music-playback">
+        <span class="switch-label">Video Disabler (for Music)</span>
+        <span class="switch">
+          <input type="checkbox" id="disable-music-playback">
+          <span class="switch-slider"></span>
+        </span>
+      </label>
+      <small>When ON, music videos are detected and their playback is forcefully disabled (muted, paused, and dimmed). Detection uses the video category, the &lt;meta&gt; genre, the title, whether the video is auto-generated, and whether the artist has a verified-music badge. When OFF, no playback is disabled.</small>
     </div>
   </div>
 

@@ -9,12 +9,16 @@ const DEFAULTS = {
     'PLHcBUkwitvcNfuhdyZIO8uldRlQYOndTS',
   ],
   exportSubfolder: 'Prayers',
+  blockMusicVideos: true,
+  disableMusicPlayback: false,
 };
 
 const inputs = {
   defaultPrayerTime: document.getElementById('default-prayer-time'),
   extendedPrayerTime: document.getElementById('extended-prayer-time'),
   exportSubfolder: document.getElementById('export-subfolder'),
+  blockMusicVideos: document.getElementById('block-music-videos'),
+  disableMusicPlayback: document.getElementById('disable-music-playback'),
 };
 
 const urlList = document.getElementById('url-list');
@@ -393,6 +397,8 @@ function readSettings() {
     extendedPrayerTime: parseInt(inputs.extendedPrayerTime.value) || DEFAULTS.extendedPrayerTime,
     whitelistedSites: whitelistedSites.filter(id => safeString(id).trim().length > 0),
     exportSubfolder: inputs.exportSubfolder.value.trim(),
+    blockMusicVideos: !!inputs.blockMusicVideos.checked,
+    disableMusicPlayback: !!inputs.disableMusicPlayback.checked,
   };
 }
 
@@ -408,6 +414,8 @@ function loadSettings() {
     inputs.defaultPrayerTime.value = settings.defaultPrayerTime;
     inputs.extendedPrayerTime.value = settings.extendedPrayerTime;
     inputs.exportSubfolder.value = settings.exportSubfolder;
+    inputs.blockMusicVideos.checked = settings.blockMusicVideos !== false;
+    inputs.disableMusicPlayback.checked = settings.disableMusicPlayback === true;
     const sites = Array.isArray(settings.whitelistedSites)
       ? settings.whitelistedSites.filter(s => typeof s === 'string')
       : DEFAULTS.whitelistedSites;
@@ -452,6 +460,8 @@ resetBtn.addEventListener('click', () => {
   inputs.defaultPrayerTime.value = DEFAULTS.defaultPrayerTime;
   inputs.extendedPrayerTime.value = DEFAULTS.extendedPrayerTime;
   inputs.exportSubfolder.value = DEFAULTS.exportSubfolder;
+  inputs.blockMusicVideos.checked = DEFAULTS.blockMusicVideos;
+  inputs.disableMusicPlayback.checked = DEFAULTS.disableMusicPlayback;
   whitelistedSites = [...DEFAULTS.whitelistedSites];
   urlMeta = {};
   editingRows.clear();
