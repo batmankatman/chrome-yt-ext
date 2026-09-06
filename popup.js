@@ -19,8 +19,11 @@ function updateCounts() {
 }
 
 // ── Timer remaining display ───────────────────────────────
-// Shows remaining *playback* minutes (i.e. minutes while a video is
-// currently playing), not wall-clock minutes since the prayer was submitted.
+// Shows remaining WALL-CLOCK minutes since the prayer was submitted
+// (prayer_timestamp). The countdown always begins the moment a prayer
+// is submitted — regardless of whether the video is currently playing.
+// (Playback time is still used internally as the *block* trigger so a
+// paused video doesn't burn through the budget on its own.)
 function updateTimerDisplay() {
   const SESSION_KEY = '_prayerSession';
   chrome.storage.local.get({ [SESSION_KEY]: {} }, (result) => {
@@ -30,23 +33,15 @@ function updateTimerDisplay() {
       return;
     }
     const timeout = state.prayer_timeout_ms || 0;
-    let played = state.prayer_played_ms || 0;
-    // Include the in-progress play run, capped defensively
-    if (state.prayer_playing_since) {
-      const delta = Date.now() - state.prayer_playing_since;
-      played += Math.min(Math.max(delta, 0), 5 * 60 * 1000);
-    }
-    const remaining = timeout - played;
+    const startedAt = state.prayer_timestamp || Date.now();
+    const remaining = timeout - (Date.now() - startedAt);
     if (remaining <= 0) {
       timerEl.textContent = 'Expired';
       return;
     }
     const mins = Math.floor(remaining / 60000);
     const secs = Math.floor((remaining % 60000) / 1000);
-    const isLiveRun = !!state.prayer_playing_since;
-    timerEl.textContent = isLiveRun
-      ? `${mins}m ${secs}s (playing)`
-      : `${mins}m ${secs}s (paused)`;
+    timerEl.textContent = `${mins}m ${secs}s`;
   });
 }
 

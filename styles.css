@@ -1,5 +1,32 @@
 /* Prayer Overlay Styles */
 
+/* On-page countdown chip (shown while a prayer session is active) */
+#prayer-countdown-chip {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 999999998;
+  background: linear-gradient(135deg, #4d66d9 0%, #5c3582 100%);
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#prayer-countdown-chip:hover { filter: brightness(1.1); }
+#prayer-countdown-chip.expired { background: linear-gradient(135deg, #b71c1c 0%, #6a0a0a 100%); }
+#prayer-countdown-chip-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
 #prayer-overlay {
   position: fixed;
   top: 0;

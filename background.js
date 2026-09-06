@@ -100,20 +100,23 @@ async function exportJournal() {
 }
 
 // Fallback used when the File System Access API folder is NOT chosen.
-// We CANNOT safely append to an existing file in the user's Downloads
-// folder from a Chrome MV3 service worker — `fetch(file://…)` is blocked
-// and `chrome.fileSystem` doesn't exist in MV3. To avoid destroying
-// content written by other browsers (e.g. Vivaldi) or by previous
-// versions of this extension, we write to a UNIQUE timestamped file
-// each time. The filename stays stable (Prayers.txt) ONLY when the
-// user has granted access to a folder via "Choose Folder".
+//
+// Chrome's downloads API DOES support `conflictAction: 'overwrite'`, so
+// we always write to a STABLE filename (Prayers.txt) and overwrite any
+// existing file. The journal in chrome.storage.local is the single
+// source of truth — every export rebuilds the whole file from it, so
+// the on-disk content always matches the journal exactly. This matches
+// Vivaldi's behavior and makes Chrome write the same stable filename.
+//
+// If a user wants to merge entries from a different computer's journal
+// (or recover a `Prayers.txt` that has drifted out of sync), they can
+// use the "Import an existing Prayers.txt" affordance in settings.html
+// BEFORE the next export runs.
 async function overwriteDownloads(txt, newestId) {
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const base = EXPORT_SUBFOLDER ? `${EXPORT_SUBFOLDER}/` : '';
-  // Use uniquify so we never overwrite an existing file.
-  const filename = `${base}Prayers-${stamp}.txt`;
+  const filename = `${base}${EXPORT_FILENAME}`;
   const blob = new Blob([txt], { type: 'text/plain' });
-  await downloadBlob(blob, filename, 'uniquify');
+  await downloadBlob(blob, filename, 'overwrite');
   await chrome.storage.local.set({ lastExportedId: newestId });
 }
 
