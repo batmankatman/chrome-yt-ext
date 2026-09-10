@@ -19,35 +19,34 @@ function updateCounts() {
 }
 
 // ── Timer remaining display ───────────────────────────────
-// Prayer days roll over at 3:00 AM local time. This matches content.js
-// so the popup cannot display a stale session after the daily reset.
-function prayerDayKey(timestamp = Date.now()) {
-  const date = new Date(timestamp);
-  date.setHours(date.getHours() - 3);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-}
-
+// Shows remaining *playback* minutes (i.e. minutes while a video is
+// currently playing), not wall-clock minutes since the prayer was submitted.
 function updateTimerDisplay() {
   const SESSION_KEY = '_prayerSession';
   chrome.storage.local.get({ [SESSION_KEY]: {} }, (result) => {
     const state = result[SESSION_KEY] || {};
-    if (!state.prayer_completed || state.prayer_day_key !== prayerDayKey()) {
-      if (state.prayer_completed && state.prayer_day_key !== prayerDayKey()) {
-        chrome.storage.local.remove(SESSION_KEY);
-      }
+    if (!state.prayer_completed) {
       timerEl.textContent = '—';
       return;
     }
     const timeout = state.prayer_timeout_ms || 0;
-    const startedAt = state.prayer_timestamp || Date.now();
-    const remaining = timeout - (Date.now() - startedAt);
+    let played = state.prayer_played_ms || 0;
+    // Include the in-progress play run, capped defensively
+    if (state.prayer_playing_since) {
+      const delta = Date.now() - state.prayer_playing_since;
+      played += Math.min(Math.max(delta, 0), 5 * 60 * 1000);
+    }
+    const remaining = timeout - played;
     if (remaining <= 0) {
       timerEl.textContent = 'Expired';
       return;
     }
     const mins = Math.floor(remaining / 60000);
     const secs = Math.floor((remaining % 60000) / 1000);
-    timerEl.textContent = `${mins}m ${secs}s`;
+    const isLiveRun = !!state.prayer_playing_since;
+    timerEl.textContent = isLiveRun
+      ? `${mins}m ${secs}s (playing)`
+      : `${mins}m ${secs}s (paused)`;
   });
 }
 

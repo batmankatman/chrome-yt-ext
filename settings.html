@@ -396,7 +396,7 @@
         <input type="text" id="export-subfolder" value="Prayers" placeholder="Prayers">
         <button class="dir-btn" id="choose-dir-btn">📁 Choose Folder</button>
       </div>
-      <small>Choose the folder that already contains <code>Prayers.txt</code>. Chrome will read that file before each export, preserve its existing entries, and append only new prayers. Choose the same folder in Chrome and Vivaldi for one shared file. Without a chosen folder, Chrome cannot read an existing Downloads file and can only create or overwrite its stable export.</small>
+      <small>When a folder is chosen, entries are appended to <code>Prayers.txt</code> (cross-browser safe — choose the same folder in Chrome and Vivaldi). Without a folder, new prayers are written as timestamped <code>Prayers-{date}.txt</code> files in Downloads so existing content is never destroyed.</small>
       <div style="margin-top: 10px;">
         <details>
           <summary style="cursor: pointer; font-size: 12px; color: #9090a8;">Import an existing Prayers.txt (one-time, on a new computer)</summary>
@@ -421,7 +421,7 @@
   </div>
 
   <div class="about-section">
-    <p><strong>YouTube Prayer Blocker v1.1</strong></p>
+    <p><strong>YouTube Prayer Blocker v1.0</strong></p>
     <div style="height: 5px;"></div>
     <p><strong>Features:</strong></p>
     <ul>

@@ -67,13 +67,6 @@
     } catch { return ''; }
   }
 
-  // A prayer day runs from 3:00 AM to 2:59:59 AM the next morning.
-  function prayerDayKey(timestamp = Date.now()) {
-    const date = new Date(timestamp);
-    date.setHours(date.getHours() - 3);
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-  }
-
   // Only block watch pages that aren't already whitelisted.
   // When BLOCK_MUSIC_VIDEOS is on, music videos are *also* blockable
   // (the toggle's semantic is "should the prayer overlay apply to
@@ -100,34 +93,31 @@
     if (cat === 'music') return true;
     const genre = document.querySelector('meta[itemprop="genre"]');
     if (genre && genre.content.toLowerCase() === 'music') return true;
-    // Defensive: if neither detector nor meta-genre has fired yet, do
-    // not declare this a non-music video — the caller will wait.
-    return null;
+    return false;
   }
 
-  // Wait for detector.js to set the category attribute (up to 5s)
+  // Wait for detector.js to set the category attribute (up to 2.5s)
   function waitForCategory() {
     return new Promise((resolve) => {
       if (document.documentElement.getAttribute('data-yt-category')) {
         resolve();
         return;
       }
-
-      const observer = new MutationObserver(() => {
+      
+      const observer = new MutationObserver((mutations) => {
         if (document.documentElement.getAttribute('data-yt-category')) {
           observer.disconnect();
           resolve();
         }
       });
-
-      observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-yt-category', 'data-yt-music'] });
-
-      // Timeout fallback (5s — gives detector.js time to wait for
-      // ytInitialPlayerResponse to populate)
+      
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-yt-category'] });
+      
+      // Timeout fallback
       setTimeout(() => {
         observer.disconnect();
         resolve();
-      }, 5000);
+      }, 2500);
     });
   }
 
@@ -138,49 +128,32 @@
   function getSessionState() {
     return new Promise(resolve => {
       chrome.storage.local.get({ [SESSION_KEY]: {} }, r => {
-        const state = r[SESSION_KEY] || {};
-        if (state.prayer_completed && state.prayer_day_key !== prayerDayKey()) {
-          chrome.storage.local.remove(SESSION_KEY, () => resolve({}));
-          return;
-        }
-        resolve(state);
+        resolve(r[SESSION_KEY] || {});
       });
     });
   }
 
   function setSessionState(timeoutMs) {
-    // The session tracks BOTH wall-clock and playback time:
-    //   - prayer_timestamp        → wall-clock start (always counts, for UI)
-    //   - prayer_timeout_ms       → total budget in ms (shared)
-    //   - prayer_played_ms        → accumulated playback ms
-    //   - prayer_playing_since    → in-progress play run (null when paused)
-    //
-    // The VISIBLE countdown (popup + status) is WALL-CLOCK from
-    // prayer_timestamp — every prayer submission immediately starts a
-    // visible countdown regardless of whether the video is playing.
-    // The BLOCK trigger uses PLAYBACK time (prayer_played_ms) so a
-    // video left paused in the background won't burn through the user's
-    // budget by itself.
-    return new Promise(resolve => {
-      chrome.storage.local.set({
-        [SESSION_KEY]: {
-          prayer_completed: true,
-          prayer_timestamp: Date.now(),   // wall-clock start; UI countdown anchor
-          prayer_day_key: prayerDayKey(),
-          prayer_video_id: currentVideoId(),
-          prayer_timeout_ms: timeoutMs,
-          prayer_played_ms: 0,           // retained for diagnostics
-          prayer_playing_since: null,    // retained for diagnostics
-        }
-      }, resolve);
+    // The "timer" here counts PLAYBACK minutes, not wall-clock minutes.
+    // prayer_played_ms accumulates time the video was actively playing.
+    // prayer_playing_since tracks the current play run (null when paused).
+    chrome.storage.local.set({
+      [SESSION_KEY]: {
+        prayer_completed: true,
+        prayer_timestamp: Date.now(),   // kept for legacy/debug
+        prayer_video_id: currentVideoId(),
+        prayer_timeout_ms: timeoutMs,
+        prayer_played_ms: 0,           // accumulated playback ms
+        prayer_playing_since: null,    // set when video plays, cleared on pause
+      }
     });
   }
 
   // ── Playback tracking ────────────────────────────────
   // We listen to the main video element's play/pause events and accumulate
-  // the elapsed playing time into session.prayer_played_ms for diagnostics
-  // and backward compatibility. The authoritative countdown and blocking
-  // decision use prayer_timestamp instead.
+  // the elapsed playing time into session.prayer_played_ms. The countdown
+  // is therefore "minutes while a video is currently playing", not minutes
+  // since the prayer was submitted.
 
   let lastSyncTimer = null;
 
@@ -199,6 +172,13 @@
         prayer_playing_since: now,
       };
       chrome.storage.local.set({ [SESSION_KEY]: next });
+      // If we just crossed the threshold, re-evaluate blocking
+      if (next.prayer_played_ms >= (next.prayer_timeout_ms || Infinity)) {
+        clearSessionState();
+        if (isBlockablePage() && !document.getElementById('prayer-overlay')) {
+          showBlockingOverlay();
+        }
+      }
     });
   }
 
@@ -298,24 +278,24 @@
   }
 
   // ── Should we block? ──────────────────────────────────
-  // The wall-clock session timer drives both the visible countdown and
-  // enforcement, so a submitted prayer always starts the timer.
 
   async function shouldBlock() {
     if (!isBlockablePage()) return false;
 
     const state = await getSessionState();
-
-    // Music playback hiding is independent. The prayer overlay only
-    // applies to music when the explicit setting is enabled.
-    if (isMusicVideo() === true && !BLOCK_MUSIC_VIDEOS) return false;
-
     if (!state.prayer_completed) return true;
 
+    // Compute current played ms (add the in-progress run if currently playing)
+    let playedMs = state.prayer_played_ms || 0;
+    if (state.prayer_playing_since) {
+      const delta = Date.now() - state.prayer_playing_since;
+      // Cap defensively against tab-suspend jumps
+      playedMs += Math.min(Math.max(delta, 0), 5 * 60 * 1000);
+    }
     const timeout = state.prayer_timeout_ms || PRAYER_TIMEOUT_MS;
-    const startedAt = state.prayer_timestamp || Date.now();
 
-    if (Date.now() - startedAt >= timeout) {
+    // Timed out (by playback minutes)
+    if (playedMs >= timeout) {
       clearSessionState();
       return true;
     }
@@ -324,8 +304,6 @@
   }
 
   // ── Schedule next re-check ─────────────────────────────
-  // Re-check at wall-clock expiry so enforcement and the visible
-  // countdown cannot drift apart.
 
   let recheckTimer = null;
 
@@ -334,8 +312,11 @@
     getSessionState().then(state => {
       if (!state.prayer_completed) return;
       const timeout = state.prayer_timeout_ms || PRAYER_TIMEOUT_MS;
-      const startedAt = state.prayer_timestamp || Date.now();
-      const remaining = timeout - (Date.now() - startedAt);
+      let played = state.prayer_played_ms || 0;
+      if (state.prayer_playing_since) {
+        played += Math.min(Math.max(Date.now() - state.prayer_playing_since, 0), 5 * 60 * 1000);
+      }
+      const remaining = timeout - played;
       if (remaining > 0) {
         recheckTimer = setTimeout(async () => {
           if (await shouldBlock()) showBlockingOverlay();
@@ -393,7 +374,7 @@
 
     input.addEventListener('input', updateWordCount);
 
-    async function submitPrayer() {
+    function submitPrayer() {
       const text = input.value.trim();
       if (!text) {
         input.classList.add('shake');
@@ -402,7 +383,7 @@
         return;
       }
       savePrayer(text, 'prayer');
-      await setSessionState(PRAYER_TIMEOUT_MS);
+      setSessionState(PRAYER_TIMEOUT_MS);
       document.documentElement.style.overflow = '';
       overlay.remove();
       stopOverlayGuard();
@@ -410,7 +391,7 @@
       attachPlaybackListeners();
     }
 
-    async function submitEssay() {
+    function submitEssay() {
       const text = input.value.trim();
       if (!text) {
         input.classList.add('shake');
@@ -427,7 +408,7 @@
         return;
       }
       savePrayer(text, 'essay');
-      await setSessionState(ESSAY_TIMEOUT_MS);
+      setSessionState(ESSAY_TIMEOUT_MS);
       document.documentElement.style.overflow = '';
       overlay.remove();
       stopOverlayGuard();
@@ -718,12 +699,6 @@
     if (namespace !== 'local') return;
     if (changes.blockMusicVideos) {
       BLOCK_MUSIC_VIDEOS = changes.blockMusicVideos.newValue === true;
-      if (isOnWatch()) {
-        shouldBlock().then(block => {
-          if (block) showBlockingOverlay();
-          else removeOverlay();
-        });
-      }
     }
     if (changes.disableMusicPlayback) {
       DISABLE_MUSIC_PLAYBACK = changes.disableMusicPlayback.newValue !== false;
@@ -770,8 +745,9 @@
       stopMusicDisabler();
     }
 
-    // Decide prayer-block path. Music videos are exempt unless
-    // BLOCK_MUSIC_VIDEOS is enabled.
+    // Decide prayer-block path. Music videos are skipped from the
+    // overlay only when BLOCK_MUSIC_VIDEOS is on; with the default
+    // setting (ON), the prayer overlay never appears for music videos.
     if (await shouldBlock()) {
       const show = () => {
         showBlockingOverlay();
