@@ -29,7 +29,8 @@ POLICIES & RULES
 3. PRAYER ENTRY (default mode)
    - Requires any non-empty text.
    - Grants 5 minutes of access to the current video.
-   - After 5 minutes, the overlay re-appears.
+    - The timer starts immediately after submission, even if the video
+    remains paused. After 5 minutes, the overlay re-appears.
 
 4. ESSAY ENTRY (toggle mode)
    - Activated by clicking the "Essay" button before submitting.
@@ -61,9 +62,11 @@ POLICIES & RULES
 8. JOURNAL & EXPORT
    - Every prayer and essay is saved to chrome.storage.local with
      date, time, type, and full text.
-   - After every submission, the full journal is automatically
-     exported (overwritten) to:
-       ~/Downloads/Consider_before_consuming/prayer-journal.txt
+   - Prayer days reset at 3:00 AM local time.
+   - Choose the folder containing Prayers.txt in Settings. Chrome reads
+     that file before each export, preserves its existing text, and
+     appends only new entries. Without a chosen folder, Chrome cannot
+     read an arbitrary existing Downloads file.
    - A manual export button is available in the Prayer Journal modal
      and in the extension popup.
 

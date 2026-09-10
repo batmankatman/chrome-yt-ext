@@ -35,11 +35,9 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
 
 // ── Build the full Prayers.txt content from the journal ─────────
 //
-// `prayerJournal` is the single source of truth. Every export rebuilds
-// the whole file from it and overwrites Prayers.txt on disk, so the
-// filename is always stable (no Prayers-{timestamp}.txt shenanigans
-// on Chrome). lastExportedId is tracked only to short-circuit when
-// nothing has changed.
+// `prayerJournal` supplies the new entries. When a folder handle is
+// available, every export reads Prayers.txt first and appends only
+// entries not already present, preserving the existing file contents.
 
 function buildJournalText(prayers) {
   // Oldest first so the file reads chronologically
@@ -53,21 +51,66 @@ function buildJournalText(prayers) {
   return txt;
 }
 
+function journalEntryKey(entry) {
+  return `${entry.date || ''}|${entry.time || ''}|${entry.type || 'prayer'}|${String(entry.text || '').trim()}`;
+}
+
+function parseJournalText(text) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  const headerRe = /^(.+?)\s+at\s+(.+?)(?:\s+\[Essay\])?\s*$/;
+  const entries = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const header = lines[index];
+    const match = header.match(headerRe);
+    if (!match) {
+      index += 1;
+      continue;
+    }
+
+    const entry = {
+      date: match[1],
+      time: match[2],
+      type: /\[Essay\]/.test(header) ? 'essay' : 'prayer',
+      text: ''
+    };
+    index += 1;
+    while (index < lines.length && !lines[index].trim()) index += 1;
+    if (index < lines.length && /^-+$/.test(lines[index].trim())) index += 1;
+
+    const body = [];
+    while (index < lines.length && lines[index].trim() && !headerRe.test(lines[index])) {
+      body.push(lines[index]);
+      index += 1;
+    }
+    entry.text = body.join('\n').trim();
+    if (entry.text) entries.push(entry);
+  }
+
+  return entries;
+}
+
+function appendMissingEntries(existingText, prayers) {
+  const existingEntries = parseJournalText(existingText);
+  const existingKeys = new Set(existingEntries.map(journalEntryKey));
+  const missing = prayers.filter(prayer => !existingKeys.has(journalEntryKey(prayer)));
+  if (!missing.length) return existingText;
+
+  let output = String(existingText || '');
+  if (output && !output.endsWith('\n')) output += '\n';
+  if (output && !output.endsWith('\n\n')) output += '\n';
+  output += buildJournalText(missing);
+  return output;
+}
+
 async function exportJournal() {
-  const result = await chrome.storage.local.get({
-    prayerJournal: [],
-    lastExportedId: 0
-  });
+  const result = await chrome.storage.local.get({ prayerJournal: [] });
   const prayers = result.prayerJournal || [];
 
-  // Skip the write only if the journal is empty (nothing to write) or
-  // if nothing has changed since the last export. We rebuild the whole
-  // file every time we write, so the on-disk content always matches
-  // the journal exactly.
-  const lastId = result.lastExportedId || 0;
-  const newestId = prayers.reduce((m, p) => Math.max(m, p.id || 0), 0);
+  // Read the target file on every export. This is intentional: it may
+  // have been updated by Vivaldi or edited outside the extension.
   if (!prayers.length) return;
-  if (newestId <= lastId) return;
 
   const txt = buildJournalText(prayers);
 
@@ -78,46 +121,46 @@ async function exportJournal() {
       if (permission !== 'granted') {
         const granted = await customExportDirectoryHandle.requestPermission({ mode: 'readwrite' });
         if (granted !== 'granted') {
-          console.log('Permission denied for custom export folder, falling back to Downloads');
-          return overwriteDownloads(txt, newestId);
+          console.log('Permission denied for custom export folder; export cancelled');
+          return;
         }
       }
       const fileHandle = await customExportDirectoryHandle.getFileHandle(EXPORT_FILENAME, { create: true });
+      const existingFile = await fileHandle.getFile();
+      const existingText = await existingFile.text();
+      const mergedText = appendMissingEntries(existingText, prayers);
       const writable = await fileHandle.createWritable();
-      await writable.write(txt);
+      await writable.write(mergedText);
       await writable.close();
-      await chrome.storage.local.set({ lastExportedId: newestId });
       console.log('Prayer journal written to custom folder');
       return;
     } catch (err) {
-      console.error('Failed to write to custom folder, falling back to Downloads:', err);
-      return overwriteDownloads(txt, newestId);
+      console.error('Failed to read or write the selected Prayers.txt:', err);
+      return;
     }
   }
 
   // Fallback: write directly to Downloads as a stable filename
-  return overwriteDownloads(txt, newestId);
+  return overwriteDownloads(txt);
 }
 
 // Fallback used when the File System Access API folder is NOT chosen.
 //
-// Chrome's downloads API DOES support `conflictAction: 'overwrite'`, so
-// we always write to a STABLE filename (Prayers.txt) and overwrite any
-// existing file. The journal in chrome.storage.local is the single
-// source of truth — every export rebuilds the whole file from it, so
-// the on-disk content always matches the journal exactly. This matches
-// Vivaldi's behavior and makes Chrome write the same stable filename.
+// The downloads API can write a stable filename, but it cannot read an
+// existing Downloads file. For true read/merge/preserve behavior, the
+// user must choose the folder containing Prayers.txt in Settings first.
+// This fallback is retained for first-run installs where no handle has
+// been granted yet; it should not be used to merge an existing journal.
 //
 // If a user wants to merge entries from a different computer's journal
 // (or recover a `Prayers.txt` that has drifted out of sync), they can
 // use the "Import an existing Prayers.txt" affordance in settings.html
 // BEFORE the next export runs.
-async function overwriteDownloads(txt, newestId) {
+async function overwriteDownloads(txt) {
   const base = EXPORT_SUBFOLDER ? `${EXPORT_SUBFOLDER}/` : '';
   const filename = `${base}${EXPORT_FILENAME}`;
   const blob = new Blob([txt], { type: 'text/plain' });
   await downloadBlob(blob, filename, 'overwrite');
-  await chrome.storage.local.set({ lastExportedId: newestId });
 }
 
 function downloadBlob(blob, filename, conflictAction) {

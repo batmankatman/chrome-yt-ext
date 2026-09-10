@@ -458,9 +458,9 @@ chooseDirBtn.addEventListener('click', async () => {
 // folder directly, so on a fresh computer the only way to bootstrap the
 // journal with existing entries is to let the user paste / upload the
 // old Prayers.txt here. We parse it back into prayerJournal entries
-// and assign fresh IDs. The next export will rebuild Prayers.txt with
-// the combined set, so existing prayers from another computer are
-// never lost.
+// and assign fresh IDs. The next export will merge the journal with
+// the selected Prayers.txt, so existing prayers from another computer
+// are never lost.
 
 function parsePrayersTxt(text) {
   // Each entry looks like:
@@ -548,11 +548,6 @@ async function importPrayersTxt(text) {
   }
   await new Promise(r =>
     chrome.storage.local.set({ prayerJournal }, r)
-  );
-  // Reset lastExportedId so the next export treats the combined journal
-  // as freshly needing to be written.
-  await new Promise(r =>
-    chrome.storage.local.set({ lastExportedId: 0 }, r)
   );
   showStatus(`Imported ${added} prayer${added === 1 ? '' : 's'}.`);
   // Trigger a re-export so the file on disk reflects the merged set.

@@ -19,16 +19,22 @@ function updateCounts() {
 }
 
 // ── Timer remaining display ───────────────────────────────
-// Shows remaining WALL-CLOCK minutes since the prayer was submitted
-// (prayer_timestamp). The countdown always begins the moment a prayer
-// is submitted — regardless of whether the video is currently playing.
-// (Playback time is still used internally as the *block* trigger so a
-// paused video doesn't burn through the budget on its own.)
+// Prayer days roll over at 3:00 AM local time. This matches content.js
+// so the popup cannot display a stale session after the daily reset.
+function prayerDayKey(timestamp = Date.now()) {
+  const date = new Date(timestamp);
+  date.setHours(date.getHours() - 3);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
 function updateTimerDisplay() {
   const SESSION_KEY = '_prayerSession';
   chrome.storage.local.get({ [SESSION_KEY]: {} }, (result) => {
     const state = result[SESSION_KEY] || {};
-    if (!state.prayer_completed) {
+    if (!state.prayer_completed || state.prayer_day_key !== prayerDayKey()) {
+      if (state.prayer_completed && state.prayer_day_key !== prayerDayKey()) {
+        chrome.storage.local.remove(SESSION_KEY);
+      }
       timerEl.textContent = '—';
       return;
     }
